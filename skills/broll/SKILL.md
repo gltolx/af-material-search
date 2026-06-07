@@ -7,8 +7,9 @@ description: 口播视频多平台 B-roll 素材搜割 + 关联度筛选流水�
 
 项目根:`{{BROLL_HOME}}`。给一批口播稿,按下面 8 步跑。**复用已有脚本,别重写逻辑。** 细节见 repo 的 `PLAN-B.md` / `SCORING.md` / `ARCHITECTURE.md`(§13 平台分工、§14 查询姿势)。
 
-## 0. 先自检(必做)
-`bash {{BROLL_HOME}}/preflight.sh` —— 有红灯先修或问用户(它会自愈 yt-dlp 毒行等环境坑)。**报"缺失/坏"类红灯(换机/环境被清)** → 先 `bash setup.sh` 一次性补装(幂等,已装的跳过),再重跑 preflight;登录态类红灯让用户在 Chrome 登录后重试。
+## 0. 先同步 + 自检(必做,顺序别反)
+1. **自动同步最新代码**:`bash {{BROLL_HOME}}/selfupdate.sh` —— ff-only 拉 origin,每次用技能都跑(代码常驻最新,免手动 git pull);离线/脏树/非 git 仓自动跳过不阻塞,merge 成功会顺带重新盖章各客户端的 SKILL.md。
+2. **自检**:`bash {{BROLL_HOME}}/preflight.sh` —— 有红灯先修或问用户(它会自愈 yt-dlp 毒行等环境坑)。**报"缺失/坏"类红灯(换机/环境被清)** → 先 `bash {{BROLL_HOME}}/setup.sh` 一次性补装(幂等,已装的跳过),再重跑 preflight;登录态类红灯让用户在 Chrome 登录后重试。**全新机/换客户端**:先 `bash {{BROLL_HOME}}/install.sh`(装技能进 Claude/Codex + 装环境 + 自检,幂等)。
 
 ## 8 步流水线
 1. **接稿**:稿子放 `topics/{选题}/` 或直接读。
