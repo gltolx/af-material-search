@@ -1,0 +1,12 @@
+# 运行产物 / 选题数据(每批由 AI 现生成;脚本会按需建 results/。不入仓,~466MB)
+results/
+results_*/
+
+# Python 缓存 / macOS 杂物
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# 安装时生成的契约软链(由 install.sh 现建,不入仓)
+/AGENTS.md
