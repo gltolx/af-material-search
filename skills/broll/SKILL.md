@@ -16,9 +16,10 @@ description: 口播视频多平台 B-roll 素材搜割 + 关联度筛选流水�
 2. **出 `results/relevance_spec.json`**(每选题一次):AI 读稿提炼视觉概念 → 概念词 + 负面词 + 平台分工 + 三色阈值,**外加四组查询词**:`bili_queries`(数组)、`yt_queries`(`[["kw",N],...]`)给 `harvest_net.py` 读;`xhs_queries`/`douyin_queries`(数组)给前台浏览器收割用。查询/概念**必带年代/意图锚点**(上世纪/八九十年代 · 老式/复古/怀旧/年代感 · 回忆杀/那些年/童年)+ 平台行话(**描述≠召回**)。换选题只改这一处。
 3. **四平台【并行】收割 → `results/scored.json`**(`[{platform,title,url,page,cover}]`):**三股并行,挂钟≈max 而非 sum**(实测 6 步全干净≈6-7 分,对比串行≈32 分 ~5×)。
    - **后台流(Bash,无浏览器,run_in_background):** `BROLL_RES=<dir> python3 harvest_net.py` —— B站 ∥ YouTube 双线程(ThreadPoolExecutor),~30s,写 `harvest_net.json`,被前台吸收。
-   - **前台浏览器流(单 Chrome,串行但快;子 agent 不能并发驱动第二个 Chrome):**
+   - **前台浏览器流(单 Chrome,串行但快;子 agent 不能并发驱动第二个 Chrome)。先判 runtime:手上有 `mcp__claude-in-chrome__*`(navigate/javascript_tool 等)吗?——【有】=Claude Code,照下面小红书/抖音原文走(首选);【无,只有 chrome-devtools 的 navigate/evaluate】=Codex,见本段末"⤷ Codex 旁注":**
      - **小红书** DOM 抓(CLI `xhs` 已被韩国出口 IP captcha 焊死,改走浏览器=国内节点):navigate `xiaohongshu.com/search_result?keyword=KW&type=video` → JS `scrollTo` 到底 ×3 懒加载 → 抓 `a[href*="/explore/"]` 的 note id(**`id.split('').join('.')` 点分隔躲工具对长串的屏蔽**)+ 封面 `img.src` + `.title` 文本;localStorage 跨同源页累计,末尾**`fetch` POST 到本地 `writer_server.py`(loopback :8799)落盘**(`navigator.clipboard` 在重页会卡死,别用)。~9 词≈230 条。
      - **抖音** DOM 抓(**废弃方向键+iesdouyin,改 DOM-scrape,~10×快且稳**):navigate `douyin.com/search/KW?type=video` → 等 render(轮询 `a[href*="/video/"]`.length>0,~5s)→ 抓 `.search-result-card` 内 `a[href*="/video/"]` 的 19 位 id(点分隔)+ 封面 `img.src` + 最长非数字叶子文本当标题;**`url` 留空,无水印解析延后到【选片后只解被选中的】**(绕开 iesdouyin 对 KR 的 ~80 次限流)。**节奏 ≥8s/词避反爬**;同 writer_server 桥落盘。~6 词≈170 条。
+     - **⤷ Codex 旁注(只有 Codex 看,Claude Code 跳过)**:没有 Claude-in-Chrome → 小红书/抖音改走 **`browser_harvest_codex.md`**:**同一套收割 JS**(就上面那两段),只是用 **chrome-devtools MCP 的 `navigate`+`evaluate`** 驱动、数据靠 **`evaluate` 直接返回**(实测 token 不被屏蔽)而非 writer_server;落盘文件名/字段 schema 与 Claude 轨**完全一致**,`merge_scored.py` 不分平台、下游零改动。先 `bash {{BROLL_HOME}}/codex_chrome.sh` 起采集 Chrome(带调试端口+持久 profile,首登三平台)。
    - **合并**:`python3 merge_scored.py`(读 harvest_net/xhs/douyin 三文件 → scored.json,canon 去重)。
    - **浏览器 JS 直接套 `browser_harvest_snippets.md`**(抖音/小红书 DOM 抓取 + writer 桥的实测片段,别现推)。先 `BROLL_RES=<dir> python3 writer_server.py &` 起落盘桥。
    - 隔离重跑:三脚本+score/apply 都认 `BROLL_RES=<abs dir>` 环境变量(默认 `results/`),非破坏性跑进 `results_xxx/`。

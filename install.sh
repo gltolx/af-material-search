@@ -36,6 +36,13 @@ echo "== 装环境 + 自检(setup.sh → preflight)=="
 bash "$ROOT/setup.sh"
 PF=$?
 
+# 4) Codex 专属:注册 chrome-devtools 浏览器 MCP(收割小红书/抖音用)。仅当本机有 Codex 才做,完全不碰 ~/.claude → Claude Code 零影响。
+if [ -d "$HOME/.codex" ]; then
+  echo ""
+  echo "== Codex 浏览器轨配置(仅 Codex;不影响 Claude Code)=="
+  bash "$ROOT/setup_codex_browser.sh" || echo "  [警告] Codex 浏览器轨未配好(不影响 Claude 轨与环境绿灯)"
+fi
+
 echo ""
 if [ "$PF" -eq 0 ]; then
   echo "✅ READY:技能已装($n 个客户端)+ 环境绿灯。cd 进 repo,丢一批稿子说「用 /broll」即可。"
