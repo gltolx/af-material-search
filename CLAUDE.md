@@ -19,6 +19,7 @@
 - 小红书:`~/.local/share/uv/tools/xiaohongshu-cli/bin/xhs`(已登录;`xhs search "kw" --type video --json`)
 - B站/YT/小红书 下载:`~/Library/Python/3.9/bin/yt-dlp` + `~/.local/bin/ffmpeg`(优先 avc1;B站带 `--cookies-from-browser chrome` 解锁 1080P,没 cookie 海外 IP 412/封顶 480P;小红书喂带 token 的 page 走 explore SSR 直下;YT 韩国 IP 只 360p/403)
 - 选片→下载端点:`download_server.py`(loopback :8788,**用 douyin venv python 跑**——直下抖音 + subprocess yt-dlp;`POST /download` 下载、`GET /preview?page=` 给小红书悬浮播放做 Range 代理)
+- **批量清洗(2026-06,边下边清)**:filtered.html 除「⬇下载选中」还有「🧹批量清洗选中」——勾选 → `POST :8788/clean` → 秒回 task_id → Mac 按平台下载(四平台≤1080p)→ 边下边逐条传到清洗机 node2(matclean)→ 真 VLM 清字幕/logo/模板带 → 跳进度页 `https://tool.alphafin.world/?job=<task_id>` 看+下成片(每条 待清洗→清洗中→完成)。**清洗后端是共享的(node2,公网 tool.alphafin.world,node4 nginx→SSH隧道→node2:8848 systemd matclean),同事不用各自部署。** 起 download_server 时**必带这两个 env**(node2 强制 token,缺则 401):`MATCLEAN_CLEAN_URL=https://tool.alphafin.world MATCLEAN_CLEAN_TOKEN=14769e815e70a4be89ea98846ec2bf46 ~/.local/share/uv/tools/douyin-mcp-server/bin/python download_server.py`。注:小红书批量须当次新鲜 token(老 URL 可能失效);YT 长视频清洗按时长耗时(4.5min 片约 10min,正常非卡死)。
 - 网络:Bash 出口在韩国,但浏览器走国内节点 → 抖音/小红书/B站可用。
 
 ## 数据契约(脚本间靠它对接,别改字段名)
