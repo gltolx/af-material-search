@@ -98,22 +98,38 @@ def _ytdlp(target, outbase, extra):
 
 
 def dl_bilibili(item, outbase):
+    # 按短边卡 1080(竖屏 1080p 的 height=1920,旧 [height<=1080] 会把它降到 480p);-S res=短边
     return _ytdlp(item.get("page") or item.get("url"), outbase, [
         "--cookies-from-browser", "chrome", "--user-agent", UA,
         "--add-header", "Referer:https://www.bilibili.com/",
-        "-f", "bv*[vcodec^=avc1][height<=1080]+ba/bv*[height<=1080]+ba/b[height<=1080]/b",
+        "-f", "bv*+ba/b", "-S", "res:1080,vcodec:avc1,acodec:m4a",
         "--merge-output-format", "mp4"])
 
+
+YTDLP_NEW = os.path.expanduser("~/.local/bin/yt-dlp-new")   # 2026.03.17 独立二进制 + deno 本地 PO-token 破 SABR(见记忆 youtube-1080p-sabr-bypass)
 
 def dl_youtube(item, outbase):
-    # 韩国出口 IP 下 YT 只见 fmt18(360p)且数据下载被 403 封 —— 硬限制,需在国内节点跑才有高清。
-    fn, err = _ytdlp(item.get("page") or item.get("url"), outbase, [
-        "--user-agent", UA,
-        "-f", "bv*[vcodec^=avc1][height<=1080]+ba/18/b[height<=1080]/b",
-        "--merge-output-format", "mp4"])
-    if not fn and ("403" in (err or "") or "Invalid data" in (err or "") or "segment" in (err or "").lower()):
-        err = "YouTube 拒绝自动化下载媒体(403/反爬,请求被标 gcr=cn;非地域封锁)→ 走浏览器节点下"
-    return fn, err
+    # 真 1080p 走 yt-dlp-new(Deno 解 PO token)。普通 yt-dlp 封顶 ~720p HLS。按短边卡 1080。
+    target = item.get("page") or item.get("url")
+    if os.path.exists(YTDLP_NEW):
+        env = dict(os.environ, PATH=os.path.expanduser("~/.local/bin") + ":" + os.environ.get("PATH", ""))
+        cmd = [YTDLP_NEW, "--no-warnings", "--no-playlist", "--ffmpeg-location", FFMPEG,
+               "--cookies-from-browser", "chrome",
+               "-f", "bv*+ba/b", "-S", "res:1080,vcodec:avc1,acodec:m4a",
+               "--merge-output-format", "mp4", "-o", outbase + ".%(ext)s",
+               "--no-overwrites", "--retries", "10", target]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env)
+        except subprocess.TimeoutExpired:
+            pass
+        f = _find_output(outbase)
+        if f and os.path.getsize(f) > 1024:
+            return f, ""
+    # 兜底:普通 yt-dlp(可能只到 720p,但有总比无好)
+    fn, err = _ytdlp(target, outbase, [
+        "--cookies-from-browser", "chrome", "--user-agent", UA,
+        "-f", "bv*+ba/b", "-S", "res:1080,vcodec:avc1,acodec:m4a", "--merge-output-format", "mp4"])
+    return fn, (err or "")
 
 
 _XHS_IMGS = None
