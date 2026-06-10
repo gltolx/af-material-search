@@ -264,9 +264,9 @@ JS = r"""
     buf+=dec.decode(r.value,{stream:true}); var lines=buf.split("\n"); buf=lines.pop();
     lines.forEach(function(ln){ if(!ln.trim())return; var o; try{o=JSON.parse(ln);}catch(_){return;}
      if(o.event==="start"){ jobUrl=o.url; try{localStorage.setItem("mc_last_job",o.job_id);}catch(_){}
-      log.textContent="✅ 任务已建("+o.total+"条)task_id="+o.job_id+" → 正在边下边清"; }
+      log.innerHTML="✅ 任务已建("+o.total+"条)task_id="+o.job_id+" → <a href='"+o.url+"' target='_blank' style='color:#2563eb;font-weight:700;text-decoration:underline'>打开清洗进度页</a>"; }
      else if(o.event==="item"){ log.textContent="["+o.i+"/"+o.total+"] "+(o.title||"")+" — "+o.status+(o.error?(" "+o.error):""); }
-     else if(o.event==="done"){ log.textContent="✅ 本批已全部投递,清洗在后台进行,正在打开进度页 →"; if(jobUrl) window.open(jobUrl,"_blank"); }
+     else if(o.event==="done"){ if(jobUrl) window.open(jobUrl,"_blank"); log.innerHTML="✅ 本批已全部投递,清洗在后台进行 → <a href='"+jobUrl+"' target='_blank' style='color:#2563eb;font-weight:700;text-decoration:underline'>打开清洗进度页</a>"; }
      else if(o.event==="error"){ log.textContent="✗ "+o.error; }
     });
    }
