@@ -22,7 +22,9 @@ def resolve_once(vid):
     data = ld[key]["videoInfoRes"]["item_list"][0]
     v = data.get("video", {})
     play = (v.get("play_addr", {}).get("url_list") or [None])[0]
-    if play: play = play.replace("playwm", "play")
+    if play: play = play.replace("playwm", "play")  # 返回基址(默认ratio=720p);抬到1080p放在下载端
+    # 抠不出 1080p 不能盲目把 ratio 改 1080p——约30%新闻片无1080p无水印转码,强抬反而被甩到576p实验流。
+    # 正确做法:下载端 dl_douyin 试1080p→量真实分辨率→<1080则回退真720p(取较大者)。要求:有更高清不低于1080p。
     cov = (v.get("cover", {}).get("url_list") or v.get("origin_cover", {}).get("url_list") or [None])[0]
     dms = v.get("duration")  # 抖音时长在 video.duration,单位毫秒(顶层 duration 是 None)
     return {"id": vid, "title": (data.get("desc", "") or "").strip(), "play": play or "", "cover_remote": cov or "",

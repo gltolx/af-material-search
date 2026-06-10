@@ -171,6 +171,51 @@ def dl_xiaohongshu(item, outbase):
     return None, err
 
 
+def _set_ratio(u, r):
+    return re.sub(r"ratio=[^&]*", "ratio=" + r, u) if "ratio=" in u else u + ("&" if "?" in u else "?") + "ratio=" + r
+
+
+def _mp4_short_side(path):                   # 读 mp4 tkhd 量真实短边(不依赖 ffprobe);失败回 0
+    import struct
+    try:
+        data = open(path, "rb").read()
+    except Exception:
+        return 0
+    best, i = (0, 0), 0
+    while True:
+        j = data.find(b"tkhd", i)
+        if j < 0:
+            break
+        try:
+            sz = struct.unpack(">I", data[j - 4:j])[0]; box = data[j - 4:j - 4 + sz]
+            if len(box) >= 8:
+                w = struct.unpack(">I", box[-8:-4])[0] >> 16; hh = struct.unpack(">I", box[-4:])[0] >> 16
+                if w * hh > best[0] * best[1]: best = (w, hh)
+        except Exception:
+            pass
+        i = j + 4
+    return min(best) if best[0] and best[1] else 0
+
+
+def _dl_once(play, h, out):
+    import requests
+    err = ""
+    for i in range(3):                       # douyinvod CDN 经韩国出口偶发 SSL/Proxy 抖动,必须重试退避
+        try:
+            resp = requests.get(play, headers=h, timeout=90, stream=True)
+            resp.raise_for_status()
+            with open(out, "wb") as f:
+                for c in resp.iter_content(1 << 16):
+                    if c: f.write(c)
+            if os.path.getsize(out) > 1024:
+                return True, ""
+            err = "文件过小"
+        except Exception as e:
+            err = str(e)[:80]
+        time.sleep(2 * (i + 1))
+    return False, err
+
+
 def dl_douyin(item, outbase):
     if dy_resolve is None:
         return None, "抖音不可用(没用 douyin venv python 跑?):" + _DY_ERR
@@ -183,24 +228,22 @@ def dl_douyin(item, outbase):
     play = r.get("play")
     if not play:
         return None, "解析无 play(KR限流/改版):" + (r.get("err", "") or "")
-    import requests
     h = {**DY_HDR, "Referer": "https://www.douyin.com/"}
     out = outbase + ".mp4"
-    err = ""
-    for i in range(3):                       # douyinvod CDN 经韩国出口偶发 SSL/Proxy 抖动,必须重试退避
-        try:
-            resp = requests.get(play, headers=h, timeout=90, stream=True)
-            resp.raise_for_status()
-            with open(out, "wb") as f:
-                for c in resp.iter_content(1 << 16):
-                    if c: f.write(c)
-            if os.path.getsize(out) > 1024:
-                return out, ""
-            err = "文件过小"
-        except Exception as e:
-            err = str(e)[:80]
-        time.sleep(2 * (i + 1))
-    return None, "下载失败:" + err
+    # 要求:有更高清就不低于1080p。先取1080p,量真实分辨率;若<1080(约30%新闻片无1080p无水印转码,
+    # 强抬会被甩到576p实验流)则回退到真720p,保留较大者。源即≤720p的视频两档相同,无副作用。
+    ok, err = _dl_once(_set_ratio(play, "1080p"), h, out)
+    if not ok:
+        return None, "下载失败:" + err
+    if _mp4_short_side(out) >= 1080:
+        return out, ""
+    alt = out + ".720"
+    ok2, _ = _dl_once(_set_ratio(play, "720p"), h, alt)
+    if ok2 and _mp4_short_side(alt) > _mp4_short_side(out):
+        os.replace(alt, out)
+    elif os.path.exists(alt):
+        os.remove(alt)
+    return out, ""
 
 
 DOWNLOADERS = {"bilibili": dl_bilibili, "youtube": dl_youtube,
