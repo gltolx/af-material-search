@@ -169,6 +169,7 @@ JS = r"""
    if(za){ za.checked=n>0&&n===arr.length; za.indeterminate=n>0&&n<arr.length; }
   });
   var b=document.getElementById("dlSel"); if(b){b.textContent="⬇ 下载选中 ("+tot+")"; b.disabled=tot===0;}
+  var cb=document.getElementById("clnSel"); if(cb){cb.textContent="🧹 批量清洗选中 ("+tot+")"; cb.disabled=tot===0;}
  }
  document.addEventListener("change",function(e){
   var t=e.target;
@@ -247,6 +248,31 @@ JS = r"""
   }catch(err){ log.textContent="✗ 连不上下载端点,请先起 download_server.py(用 douyin venv python 跑)。"; }
   dl.disabled=false; refresh();
  });
+ /* 批量清洗:不下到本地、不弹文件夹;POST /clean → 秒回 job_id → 跳清洗页 */
+ var cln=document.getElementById("clnSel");
+ cln.addEventListener("click",async function(){
+  var checked=Array.prototype.slice.call(document.querySelectorAll('input.sel')).filter(function(c){return c.checked;});
+  if(!checked.length){log.textContent="先勾选要清洗的素材";return;}
+  cln.disabled=true; var prev=cln.textContent; cln.textContent="清洗登记中…";
+  var items=checked.map(function(c){var d=c.dataset;return {platform:d.plat,page:d.page,url:d.url,title:d.title,verdict:d.verdict,score:d.score};});
+  var jobUrl=null;
+  try{
+   var resp=await fetch("http://127.0.0.1:8788/clean",{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({items:items})});
+   var reader=resp.body.getReader(),dec=new TextDecoder(),buf="";
+   while(true){
+    var r=await reader.read(); if(r.done)break;
+    buf+=dec.decode(r.value,{stream:true}); var lines=buf.split("\n"); buf=lines.pop();
+    lines.forEach(function(ln){ if(!ln.trim())return; var o; try{o=JSON.parse(ln);}catch(_){return;}
+     if(o.event==="start"){ jobUrl=o.url; try{localStorage.setItem("mc_last_job",o.job_id);}catch(_){}
+      log.textContent="✅ 任务已建("+o.total+"条)task_id="+o.job_id+" → 正在边下边清"; }
+     else if(o.event==="item"){ log.textContent="["+o.i+"/"+o.total+"] "+(o.title||"")+" — "+o.status+(o.error?(" "+o.error):""); }
+     else if(o.event==="done"){ log.textContent="✅ 本批已全部投递,清洗在后台进行,正在打开进度页 →"; if(jobUrl) window.open(jobUrl,"_blank"); }
+     else if(o.event==="error"){ log.textContent="✗ "+o.error; }
+    });
+   }
+  }catch(err){ log.textContent="✗ 连不上下载端点,请先起 download_server.py(douyin venv python)。"; }
+  cln.textContent=prev; refresh();
+ });
  /* 选择下载文件夹:点击唤起本机原生文件夹选择器(download_server 跑 osascript choose folder),拿真实路径回填 */
  var picking=false;   /* 文件夹选择框互斥(由「下载选中」触发) */
  /* 滚动预解析:小红书卡片进视野就让 /preview 后台现解+缓存 CDN,悬浮时秒开(抖音不预解,省 KR 解析额度;B站/YT iframe 无需) */
@@ -273,6 +299,7 @@ JS = JS.replace("127.0.0.1:8788", "127.0.0.1:" + DLPORT)  # 端口随 DOWNLOAD_P
 doc = ('<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + e("素材关联度筛选 · " + _topic_disp) + '</title><style>' + CSS + '</style></head><body>'
        f'<header><div class="hleft"><h1>素材关联度语义筛选 · {e(_topic_disp)}</h1><div class="note">共{len(reps)}条 · 🟢留{len(keep)}/🟡审{len(review)}/⚪弃{len(drop)} · {e(psum)}</div></div>'
        '<div class="hright"><button id="dlSel" class="dlbtn" disabled>⬇ 下载选中 (0)</button>'
+       '<button id="clnSel" class="dlbtn" disabled>🧹 批量清洗选中 (0)</button>'
        '<span id="dllog" class="dllog"></span></div></header>'
        f'<main><h2>🟢 KEEP {len(keep)} {zsel("keep")}</h2><div class="grid" data-zone="keep">{zone(keep)}</div>'
        f'<details open><summary>🟡 REVIEW {len(review)} {zsel("review")}</summary><div class="grid" data-zone="review">{zone(review)}</div></details>'
