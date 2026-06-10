@@ -18,6 +18,8 @@ RES = os.environ.get("BROLL_RES") or os.path.join(os.path.dirname(os.path.abspat
 PORT = int(os.environ.get("DOWNLOAD_PORT", "8788"))
 DEFAULT_DIR = os.path.expanduser(os.environ.get("DOWNLOAD_DIR") or "~/Downloads/af素材")
 PLAT_CN = {"bilibili": "B站", "youtube": "YouTube", "xiaohongshu": "小红书", "douyin": "抖音"}
+CLEAN_BASE = os.environ.get("MATCLEAN_CLEAN_URL", "https://tool.alphafin.world").rstrip("/")
+CLEAN_TOKEN = os.environ.get("MATCLEAN_CLEAN_TOKEN", "")
 
 HOME = os.path.expanduser("~")
 
@@ -435,6 +437,16 @@ class H(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_response(400); self._cors(); self.end_headers()
             self.wfile.write(("bad json: " + str(e)).encode()); return
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/clean":
+            if isinstance(body, dict):
+                citems, coutdir = (body.get("items") or []), resolve_outdir(body.get("dir"))
+            else:
+                citems, coutdir = (body or []), DEFAULT_DIR
+            os.makedirs(coutdir, exist_ok=True)
+            self.send_response(200); self._cors()
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8"); self.end_headers()
+            return self.handle_clean(citems, coutdir)
         if isinstance(body, list):           # 兼容老格式:纯数组
             items, outdir = body, DEFAULT_DIR
         elif isinstance(body, dict):
@@ -463,6 +475,75 @@ class H(BaseHTTPRequestHandler):
         self._line({"event": "done", "ok": ok, "skip": skip, "fail": fail, "total": total, "dir": outdir})
         if ok + skip > 0:
             open_folder(outdir)              # 下完自动弹开 Finder 文件夹
+
+    def handle_clean(self, items, outdir):
+        import requests
+        seen = {}
+        for it in items:                                  # 按 stable_id 批内去重
+            sid = stable_id(it.get("page"), it.get("url"))
+            seen.setdefault(sid, it)
+        pairs = list(seen.items())
+        hdr = {"X-Clean-Token": CLEAN_TOKEN} if CLEAN_TOKEN else {}
+        payload = {"topic": os.path.basename(outdir.rstrip("/")) or "broll",
+                   "items": [{"stable_id": sid, "platform": it.get("platform", ""),
+                              "title": it.get("title", ""), "verdict": it.get("verdict", ""),
+                              "score": it.get("score", "")} for sid, it in pairs]}
+        try:
+            r = requests.post(CLEAN_BASE + "/api/clean/start", json=payload, headers=hdr, timeout=30)
+            job_id = r.json()["job_id"]
+        except Exception as e:
+            self._line({"event": "error", "error": "建清洗任务失败:" + str(e)[:140]}); return
+        clean_url = CLEAN_BASE + "/?job=" + job_id
+        self._line({"event": "start", "job_id": job_id, "total": len(pairs), "url": clean_url})
+        pending = []
+        for i, (sid, it) in enumerate(pairs):
+            try:
+                res = process(it, outdir)
+            except Exception as e:
+                res = {"platform": platform_of(it), "status": "fail", "file": None, "error": str(e)[:160]}
+            if res["status"] in ("ok", "skip") and res.get("file"):
+                ok = self._upload_item(job_id, sid, res["file"], hdr)
+                if not ok: pending.append(sid)
+                self._line({"event": "item", "i": i + 1, "total": len(pairs), "stable_id": sid,
+                            "status": "uploaded" if ok else "upload_fail",
+                            "title": (it.get("title") or "")[:50]})
+            else:
+                ok = self._fail_item(job_id, sid, hdr)
+                if not ok: pending.append(sid)
+                self._line({"event": "item", "i": i + 1, "total": len(pairs), "stable_id": sid,
+                            "status": "download_fail", "error": res.get("error", ""),
+                            "title": (it.get("title") or "")[:50]})
+        for sid in pending:                               # 收尾补发:未确认条目再回一轮 failed(防二阶永 loading)
+            self._fail_item(job_id, sid, hdr)
+        self._line({"event": "done", "job_id": job_id, "url": clean_url})
+
+    def _upload_item(self, job_id, sid, path, hdr):
+        import requests
+        url = CLEAN_BASE + "/api/clean/%s/item" % job_id
+        for k in range(3):
+            try:
+                with open(path, "rb") as fh:
+                    r = requests.post(url, files={sid: (sid + ".mp4", fh, "video/mp4")},
+                                      headers=hdr, timeout=900)
+                if r.status_code == 200:
+                    return True
+            except Exception:
+                pass
+            time.sleep(2 * (k + 1))
+        return False
+
+    def _fail_item(self, job_id, sid, hdr):
+        import requests
+        url = CLEAN_BASE + "/api/clean/%s/item?status=failed&stable_id=%s" % (
+            job_id, urllib.parse.quote(sid))
+        for k in range(3):
+            try:
+                if requests.post(url, headers=hdr, timeout=30).status_code == 200:
+                    return True
+            except Exception:
+                pass
+            time.sleep(2 * (k + 1))
+        return False
 
     def log_message(self, *a): pass
 
