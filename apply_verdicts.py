@@ -255,7 +255,7 @@ JS = r"""
   catch(_){ log.textContent="✗ 连不上下载端点,请先起 download_server.py(douyin venv python)"; dl.disabled=false; picking=false; return; }
   picking=false;
   if(!dir){ log.textContent="已取消(未选择文件夹)"; dl.disabled=false; return; }   /* 取消=不下载 */
-  var items=checked.map(function(c){var d=c.dataset;return {platform:d.plat,page:d.page,url:d.url,title:d.title,verdict:d.verdict,score:d.score};});
+  var items=checked.map(function(c){var d=c.dataset;return {platform:d.plat,page:d.page,url:d.url,title:d.title,verdict:d.verdict,score:d.score,script_name:d.script||"",persona:d.persona||""};});
   log.textContent="开始下载 "+items.length+" 个 → "+dir;
   var ok=0,skip=0,fail=0;
   var CN={bilibili:"B站",youtube:"YouTube",xiaohongshu:"小红书",douyin:"抖音"};
@@ -281,7 +281,7 @@ JS = r"""
   var checked=Array.prototype.slice.call(document.querySelectorAll('input.sel')).filter(function(c){return c.checked;});
   if(!checked.length){log.textContent="先勾选要清洗的素材";return;}
   cln.disabled=true; var prev=cln.textContent; cln.textContent="清洗登记中…";
-  var items=checked.map(function(c){var d=c.dataset;return {platform:d.plat,page:d.page,url:d.url,title:d.title,verdict:d.verdict,score:d.score};});
+  var items=checked.map(function(c){var d=c.dataset;return {platform:d.plat,page:d.page,url:d.url,title:d.title,verdict:d.verdict,score:d.score,script_name:d.script||"",persona:d.persona||""};});
   var jobUrl=null;
   try{
    var resp=await fetch("http://127.0.0.1:8788/clean",{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({items:items})});
