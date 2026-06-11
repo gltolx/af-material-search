@@ -11,6 +11,7 @@ import json, os
 RES = os.environ.get("BROLL_RES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 SPEC = json.load(open(os.path.join(RES, "relevance_spec.json"), encoding="utf-8"))
 NEG = SPEC["negative_terms"]
+MAXDUR = int(SPEC.get("max_duration_sec", 1200))   # R2:已知时长>此值直接 kill,省 AI 打分(双保险,apply_verdicts 还会兜)
 cands = json.load(open(os.path.join(RES, "scored.json"), encoding="utf-8"))
 
 kill, need_enrich, need_llm = [], [], []
@@ -20,9 +21,12 @@ for i, c in enumerate(cands):
     t = (c.get("title") or "").strip()
     rec = {"idx": i, "platform": plat, "title": t, "url": c.get("url", ""),
            "page": c.get("page", ""), "cover": c.get("cover", ""), "duration": c.get("duration")}
+    dur = c.get("duration")
     neg = next((n for n in NEG if n in t), None)
     if neg:
         rec["stage0"] = "kill"; rec["kill_reason"] = neg; kill.append(rec)
+    elif dur and dur > MAXDUR:
+        rec["stage0"] = "kill"; rec["kill_reason"] = f"超20分钟({dur}s)"; kill.append(rec)
     elif plat == "小红书" and (not t or t == "(无标题)" or len(t) < 2):
         rec["stage0"] = "need_enrich"; need_enrich.append(rec)
     else:
