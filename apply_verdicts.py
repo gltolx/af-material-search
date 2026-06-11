@@ -18,6 +18,18 @@ for f in sorted(glob.glob(os.path.join(RES, "scores_part*.json"))):
             if "idx" in r: scores[r["idx"]] = r
     except Exception as ex: print("⚠️", f, ex)
 
+# ---- R3/R4:逐稿匹配表(可选;由 Claude 匹配后产出)→ idx→{persona,name} ----
+try:
+    SM = json.load(open(os.path.join(RES, "script_matches.json"), encoding="utf-8"))
+except Exception:
+    SM = {}
+IDX2SCRIPT = {}
+for _sid, _info in (SM.items() if isinstance(SM, dict) else []):
+    for _m in (_info.get("matched") or []):
+        if "idx" in _m:
+            IDX2SCRIPT[_m["idx"]] = {"persona": _info.get("persona", ""), "name": _info.get("name", "")}
+UNDERMATCHED = [(_info.get("name") or "?") for _info in (SM.values() if isinstance(SM, dict) else []) if len((_info.get("matched") or [])) < 2]
+
 def verdict(c):
     s = scores.get(c["idx"]); pt = PT.get(c["platform"], DEFT)
     dur = c.get("duration")
@@ -136,6 +148,13 @@ def card(c):
     dup = f'<span class="badge dup">×{c["_dups"]+1}</span>' if c.get("_dups") else ''
     dur = c.get("duration"); durb = f'<span class="badge dur">{fmt(dur)}</span>' if dur else ''
     link = e(c.get("page") or c.get("url") or "#")
+    sm = IDX2SCRIPT.get(c["idx"])                                       # R3/R4:命中匹配 → 自动勾选+标签
+    chk = " checked" if sm else ""
+    ds = (' data-script="' + e(sm["name"]) + '" data-persona="' + e(sm.get("persona") or "") + '"') if sm else ''
+    mtag = ''
+    if sm:
+        per = e(sm.get("persona") or "")
+        mtag = '<div class="mtag">' + (('👤' + per + ' ｜ ') if per else '') + '📄' + e(sm["name"]) + '</div>'
     return ('<div class="card">'
             '<a class="thumb" href="' + link + '" target="_blank" rel="noopener"'
             ' data-plat="' + e(c["platform"]) + '" data-page="' + e(c.get("page") or "") + '" data-url="' + e(c.get("url") or "")
@@ -144,15 +163,15 @@ def card(c):
             '<label class="chk" onclick="event.stopPropagation()"><input type="checkbox" class="sel"'
             ' data-plat="' + e(c["platform"]) + '" data-page="' + e(c.get("page") or "") + '" data-url="' + e(c.get("url") or "")
             + '" data-title="' + e(c.get("title") or "") + '" data-verdict="' + e(c["verdict"])
-            + '" data-score="' + e(c["vscore"] if c["vscore"] is not None else "") + '"></label></a>'
-            '<div class="meta"><a href="' + link + '" target="_blank" rel="noopener">' + e(c.get("title") or "(无标题)") + '</a><div class="sub">' + e(c["vreason"]) + '</div></div></div>')
+            + '" data-score="' + e(c["vscore"] if c["vscore"] is not None else "") + '"' + ds + chk + '></label></a>'
+            '<div class="meta"><a href="' + link + '" target="_blank" rel="noopener">' + e(c.get("title") or "(无标题)") + '</a>' + mtag + '<div class="sub">' + e(c["vreason"]) + '</div></div></div>')
 def zone(items): return "".join(card(c) for c in sorted(items, key=lambda x: -(x["vscore"] or 0)))
 def zsel(zid):  # 标题行内联:一个三态全选复选框(全选✓/部分=横线/空)+ 本区已选计数;stopPropagation 防 summary 折叠
     return (f'<label class="zsel" onclick="event.stopPropagation()">'
             f'<input type="checkbox" class="zall" data-zone="{zid}">'
             f'<span class="zcount" id="cnt-{zid}">已选 0</span></label>')
 keep = [c for c in reps if c["verdict"] == "keep"]; review = [c for c in reps if c["verdict"] == "review"]; drop = [c for c in reps if c["verdict"] == "drop"]
-CSS = ("*{box-sizing:border-box}body{margin:0;font-family:-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif;background:#f6f7f9;color:#1a1a1a}header{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 18px;box-shadow:0 1px 4px rgba(0,0,0,.05);display:flex;align-items:center;gap:16px;flex-wrap:wrap}header h1{font-size:15px;margin:0}.note{font-size:12px;color:#6b7280;margin-top:4px}main{padding:16px;max-width:1480px;margin:0 auto}details{margin:10px 0}summary{cursor:pointer;font-size:15px;font-weight:700;padding:8px 0}h2{font-size:16px;margin:14px 0 8px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}.card{position:relative;background:#fff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;display:flex;flex-direction:column}.card:hover{box-shadow:0 3px 12px rgba(0,0,0,.10)}.thumb{position:relative;display:block;width:100%;aspect-ratio:3/4;background:#000;overflow:hidden}.im{width:100%;height:100%;object-fit:cover;display:block}.ph{width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:#888;background:#111;font-size:13px}.badge{position:absolute;color:#fff;font-size:12px;padding:2px 7px;border-radius:5px;font-weight:700}.sc{left:6px;top:6px}.plat{right:6px;top:6px;background:rgba(0,0,0,.7);font-weight:400;font-size:11px}.dup{right:6px;bottom:6px;background:#7c3aed;font-size:11px}.chk{position:absolute;left:6px;bottom:6px;z-index:7;background:rgba(255,255,255,.88);border-radius:4px;padding:2px;line-height:0}.chk input{width:18px;height:18px;cursor:pointer;display:block}.meta{padding:8px 10px}.meta a{font-size:13px;color:#111;text-decoration:none;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.35;min-height:2.7em}.sub{font-size:11px;color:#9ca3af;margin-top:4px}"
+CSS = ("*{box-sizing:border-box}body{margin:0;font-family:-apple-system,'PingFang SC','Microsoft YaHei',Arial,sans-serif;background:#f6f7f9;color:#1a1a1a}header{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid #e5e7eb;padding:10px 18px;box-shadow:0 1px 4px rgba(0,0,0,.05);display:flex;align-items:center;gap:16px;flex-wrap:wrap}header h1{font-size:15px;margin:0}.note{font-size:12px;color:#6b7280;margin-top:4px}main{padding:16px;max-width:1480px;margin:0 auto}details{margin:10px 0}summary{cursor:pointer;font-size:15px;font-weight:700;padding:8px 0}h2{font-size:16px;margin:14px 0 8px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}.card{position:relative;background:#fff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;display:flex;flex-direction:column}.card:hover{box-shadow:0 3px 12px rgba(0,0,0,.10)}.thumb{position:relative;display:block;width:100%;aspect-ratio:3/4;background:#000;overflow:hidden}.im{width:100%;height:100%;object-fit:cover;display:block}.ph{width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:#888;background:#111;font-size:13px}.badge{position:absolute;color:#fff;font-size:12px;padding:2px 7px;border-radius:5px;font-weight:700}.sc{left:6px;top:6px}.plat{right:6px;top:6px;background:rgba(0,0,0,.7);font-weight:400;font-size:11px}.dup{right:6px;bottom:6px;background:#7c3aed;font-size:11px}.chk{position:absolute;left:6px;bottom:6px;z-index:7;background:rgba(255,255,255,.88);border-radius:4px;padding:2px;line-height:0}.chk input{width:18px;height:18px;cursor:pointer;display:block}.meta{padding:8px 10px}.meta a{font-size:13px;color:#111;text-decoration:none;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.35;min-height:2.7em}.sub{font-size:11px;color:#9ca3af;margin-top:4px}.mtag{font-size:11px;color:#3730a3;background:#eef2ff;border:1px solid #c7d2fe;border-radius:4px;padding:1px 6px;margin-top:4px;display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
        ".dlbtn{background:#2563eb;color:#fff;border:0;border-radius:7px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}.dlbtn:hover{background:#1d4ed8}.dlbtn:disabled{background:#9ca3af;cursor:default}"
        ".hleft{flex:1;min-width:0}.hleft .note{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hright{display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;max-width:60%}"
        ".dlbtn2{background:#eef2ff;color:#3730a3;border:1px solid #c7d2fe;border-radius:7px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}.dlbtn2:hover{background:#e0e7ff}.dlbtn2:disabled{opacity:.6;cursor:default}.pickwrap{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:8px}.dirshow{font-size:11px;color:#6b7280;font-family:ui-monospace,Menlo,monospace;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}"
@@ -305,7 +324,9 @@ JS = r"""
 """
 JS = JS.replace("127.0.0.1:8788", "127.0.0.1:" + DLPORT)  # 端口随 DOWNLOAD_PORT 走,换机/改端口出页 JS 也连得上
 doc = ('<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + e("素材关联度筛选 · " + _topic_disp) + '</title><style>' + CSS + '</style></head><body>'
-       f'<header><div class="hleft"><h1>素材关联度语义筛选 · {e(_topic_disp)}</h1><div class="note">共{len(reps)}条 · 🟢留{len(keep)}/🟡审{len(review)}/⚪弃{len(drop)} · {e(psum)}</div></div>'
+       f'<header><div class="hleft"><h1>素材关联度语义筛选 · {e(_topic_disp)}</h1><div class="note">共{len(reps)}条 · 🟢留{len(keep)}/🟡审{len(review)}/⚪弃{len(drop)} · {e(psum)}</div>'
+       + (f'<div class="note" style="color:#b45309">⚠ 欠匹配(&lt;2条,建议补搜):{e("、".join(UNDERMATCHED))}</div>' if UNDERMATCHED else '')
+       + '</div>'
        '<div class="hright"><button id="dlSel" class="dlbtn" disabled>⬇ 下载选中 (0)</button>'
        '<button id="clnSel" class="dlbtn" disabled>🧹 批量清洗选中 (0)</button>'
        '<span id="dllog" class="dllog"></span></div></header>'
