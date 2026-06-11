@@ -268,7 +268,7 @@ JS = r"""
     buf+=dec.decode(r.value,{stream:true}); var lines=buf.split("\n"); buf=lines.pop();
     lines.forEach(function(ln){ if(!ln.trim())return; var o; try{o=JSON.parse(ln);}catch(_){return;}
      if(o.event==="item"){ if(o.status==="ok")ok++; else if(o.status==="skip")skip++; else fail++;
-      log.textContent="正在下载 ["+o.i+"/"+o.total+"] "+(CN[o.platform]||o.platform)+" "+(ST[o.status]||o.status)+(o.mb?(" "+o.mb+"MB"):"")+(o.error?(" — "+o.error):"")+"   |   成功 "+ok+" · 跳过 "+skip+" · 失败 "+fail;
+      log.textContent="正在下载 ["+o.i+"/"+o.total+"] "+(CN[o.platform]||o.platform)+" "+(ST[o.status]||o.status)+(o.mb?(" "+o.mb+"MB"):"")+(o.warn?(" ⚠"+o.warn):"")+(o.error?(" — "+o.error):"")+"   |   成功 "+ok+" · 跳过 "+skip+" · 失败 "+fail;
      } else if(o.event==="done"){ log.textContent="✅ 完成:成功 "+o.ok+" · 跳过 "+o.skip+"(已存在) · 失败 "+o.fail+(o.fail?" · 失败项见下载目录 _manifest.jsonl":"")+" · 已打开文件夹"; }
     });
    }
@@ -292,7 +292,7 @@ JS = r"""
     lines.forEach(function(ln){ if(!ln.trim())return; var o; try{o=JSON.parse(ln);}catch(_){return;}
      if(o.event==="start"){ jobUrl=o.url; try{localStorage.setItem("mc_last_job",o.job_id);}catch(_){}
       log.innerHTML="✅ 任务已建("+o.total+"条)task_id="+o.job_id+" → <a href='"+o.url+"' target='_blank' style='color:#2563eb;font-weight:700;text-decoration:underline'>打开清洗进度页</a>"; }
-     else if(o.event==="item"){ log.textContent="["+o.i+"/"+o.total+"] "+(o.title||"")+" — "+o.status+(o.error?(" "+o.error):""); }
+     else if(o.event==="item"){ log.textContent="["+o.i+"/"+o.total+"] "+(o.title||"")+" — "+o.status+(o.warn?(" ⚠"+o.warn):"")+(o.error?(" "+o.error):""); }
      else if(o.event==="done"){ if(jobUrl) window.open(jobUrl,"_blank"); log.innerHTML="✅ 本批已全部投递,清洗在后台进行 → <a href='"+jobUrl+"' target='_blank' style='color:#2563eb;font-weight:700;text-decoration:underline'>打开清洗进度页</a>"; }
      else if(o.event==="error"){ log.textContent="✗ "+o.error; }
     });

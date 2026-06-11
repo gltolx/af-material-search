@@ -268,6 +268,18 @@ DOWNLOADERS = {"bilibili": dl_bilibili, "youtube": dl_youtube,
                "xiaohongshu": dl_xiaohongshu, "douyin": dl_douyin}
 
 
+def xhs_download_warn(item):
+    """小红书无类型映射(缺 xhs_imgs.json 或该 note 不在图里)时的告警:
+    yt-dlp 无法区分图文/视频笔记,会把图文笔记下成平台自动合成的幻灯片 mp4(非静态图)。
+    有 type(normal/video)→ 路由可靠,不告警;非小红书 → 不告警。"""
+    if platform_of(item) != "xiaohongshu":
+        return ""
+    info = _xhs_imgs_map().get(_xhs_note_id(item)) or {}
+    if info.get("t"):
+        return ""
+    return "无类型映射(缺xhs_imgs.json),图文笔记可能被下成幻灯片mp4——带imageList重收割小红书再下可得静态图"
+
+
 def build_name(item):
     """文件名:有口播稿名则前缀(R4),否则 平台_标题_ID。"""
     plat = platform_of(item)
@@ -282,12 +294,13 @@ def process(item, outdir):
     os.makedirs(outdir, exist_ok=True)
     name = build_name(item)                  # 人能看懂:[口播稿名_]平台_标题_ID
     outbase = os.path.join(outdir, name)
+    warn = xhs_download_warn(item)           # 小红书无类型映射 → 图文可能被下成幻灯片 mp4,告警(不阻断)
     existing = _find_output(outbase)         # 幂等:已下过就跳过
     if existing and os.path.getsize(existing) > 1024:
-        return {"platform": plat, "status": "skip", "file": existing, "bytes": os.path.getsize(existing)}
+        return {"platform": plat, "status": "skip", "file": existing, "bytes": os.path.getsize(existing), "warn": warn}
     fn, err = DOWNLOADERS[plat](item, outbase)
     if fn:
-        return {"platform": plat, "status": "ok", "file": fn, "bytes": os.path.getsize(fn)}
+        return {"platform": plat, "status": "ok", "file": fn, "bytes": os.path.getsize(fn), "warn": warn}
     return {"platform": plat, "status": "fail", "file": None, "bytes": 0, "error": err}
 
 
@@ -299,7 +312,7 @@ def manifest_append(item, res, outdir):
            "script_name": item.get("script_name", ""), "persona": item.get("persona", ""),
            "status": res["status"],
            "file": (os.path.basename(res["file"]) if res.get("file") else ""),
-           "bytes": res.get("bytes", 0), "error": res.get("error", "")}
+           "bytes": res.get("bytes", 0), "error": res.get("error", ""), "warn": res.get("warn", "")}
     with open(os.path.join(outdir, "_manifest.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -489,7 +502,8 @@ class H(BaseHTTPRequestHandler):
             self._line({"event": "item", "i": i + 1, "total": total,
                         "platform": res["platform"], "status": res["status"],
                         "title": (item.get("title") or "")[:50],
-                        "mb": round(res.get("bytes", 0) / 1048576, 2), "error": res.get("error", "")})
+                        "mb": round(res.get("bytes", 0) / 1048576, 2), "error": res.get("error", ""),
+                        "warn": res.get("warn", "")})
         self._line({"event": "done", "ok": ok, "skip": skip, "fail": fail, "total": total, "dir": outdir})
         if ok + skip > 0:
             open_folder(outdir)              # 下完自动弹开 Finder 文件夹
@@ -522,7 +536,7 @@ class H(BaseHTTPRequestHandler):
                 if not ok: pending.append(sid)
                 self._line({"event": "item", "i": i + 1, "total": len(pairs), "stable_id": sid,
                             "status": "uploaded" if ok else "upload_fail",
-                            "title": (it.get("title") or "")[:50]})
+                            "title": (it.get("title") or "")[:50], "warn": res.get("warn", "")})
             else:
                 ok = self._fail_item(job_id, sid, hdr)
                 if not ok: pending.append(sid)
