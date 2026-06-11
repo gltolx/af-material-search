@@ -318,10 +318,11 @@ def manifest_append(item, res, outdir):
 
 
 def _clean_item(sid, it):
-    """投递 node2 的单条;name_prefix=口播稿名(R4,node2 honor 则成片带前缀),persona 备注。"""
+    """投递 node2 的单条;name=可读文件名([口播稿名_]平台_标题_ID.mp4;/item 上传时按真实后缀重定,图文→.jpg);name_prefix/persona 备注。"""
     return {"stable_id": sid, "platform": it.get("platform", ""),
             "title": it.get("title", ""), "verdict": it.get("verdict", ""),
             "score": it.get("score", ""),
+            "name": build_name(it) + ".mp4",
             "name_prefix": (it.get("script_name") or "").strip(),
             "persona": it.get("persona", "")}
 
@@ -550,11 +551,12 @@ class H(BaseHTTPRequestHandler):
     def _upload_item(self, job_id, sid, path, hdr):
         import requests
         url = CLEAN_BASE + "/api/clean/%s/item" % job_id
+        fname = os.path.basename(path)                    # 真实文件名(含正确后缀:视频.mp4/图文.jpg)→ matclean 据此重定 key
         for k in range(3):
             try:
                 with open(path, "rb") as fh:
-                    r = requests.post(url, files={sid: (sid + ".mp4", fh, "video/mp4")},
-                                      headers=hdr, timeout=900)
+                    r = requests.post(url, files={sid: (fname, fh, "application/octet-stream")},
+                                      data={"name": fname}, headers=hdr, timeout=900)
                 if r.status_code == 200:
                     return True
             except Exception:
