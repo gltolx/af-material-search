@@ -94,7 +94,7 @@
 - `apply_verdicts.py` 重渲 `filtered.html`（吃 `script_matches.json`）：匹配卡片 **自动 `checked`** + 卡片加标签 **`人设：xx ｜ 稿：xx`**（persona 空则只显示稿名）+ checkbox 多带 `data-script`/`data-persona`。欠匹配的稿在区头给提示。
 - 前端 `/download`、`/clean` 的 POST items 多带 `script_name`/`persona`。
 - `download_server.py`：文件名 `<sanitize(口播稿名)>_<平台>_<标题>_<id>.mp4`；`_manifest.jsonl` 多记 `script_name`/`persona`；`/clean` payload 也带上 `name_prefix`。
-- **node2 成片命名兜底**：本地源文件前缀 100% 生效；清洗成片名由 node2 生成，采取「传 `name_prefix` 给 node2 + 成片落地后本地按 manifest 兜底重命名」双保险，确保 R4 两条路径都成立。
+- **node2 成片命名（如实记录限制）**：批量下载路径文件名前缀 100% 由本仓控制、必生效。批量清洗路径：download_server 先把源片下到本地（同样带前缀，生效），再上传到 node2（上传文件名固定 `<stable_id>.mp4`），**清洗成片由 node2 命名且 download_server 不把成片拉回本地**——所以本地无成片可重命名。本仓能做的是把 `name_prefix` 随 `/clean` payload 投递给 node2；成片是否带前缀**取决于 node2 是否 honor 这个字段**，属共享后端依赖，本次作为待对接项记录，不在本仓兜底。
 
 ## 流水线顺序（7 步 → 8 步）
 ```
@@ -123,4 +123,4 @@
 ## 验收
 - 给一批带/不带标题与人设号的稿，跑完流水线后：`filtered.html` 中匹配素材**已自动勾选**，卡片显示人设/稿名；每稿 2~5 条（长稿更多）、独占不重复；明显人物主体素材落 drop/review；>20 分钟素材落 drop。
 - 批量下载产物文件名以口播稿名为前缀；`_manifest.jsonl` 含 `script_name`/`persona`。
-- 批量清洗：源文件前缀生效；成片经 `name_prefix`/兜底重命名后亦带前缀。
+- 批量清洗：本地下载的源文件带前缀；`name_prefix` 随 payload 投递 node2（成片是否带前缀取决于 node2 是否 honor，记为待对接项）。
