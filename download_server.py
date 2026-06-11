@@ -304,6 +304,15 @@ def manifest_append(item, res, outdir):
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+def _clean_item(sid, it):
+    """投递 node2 的单条;name_prefix=口播稿名(R4,node2 honor 则成片带前缀),persona 备注。"""
+    return {"stable_id": sid, "platform": it.get("platform", ""),
+            "title": it.get("title", ""), "verdict": it.get("verdict", ""),
+            "score": it.get("score", ""),
+            "name_prefix": (it.get("script_name") or "").strip(),
+            "persona": it.get("persona", "")}
+
+
 def resolve_outdir(raw):
     d = (raw or "").strip()
     d = os.path.expanduser(d) if d else DEFAULT_DIR
@@ -494,9 +503,7 @@ class H(BaseHTTPRequestHandler):
         pairs = list(seen.items())
         hdr = {"X-Clean-Token": CLEAN_TOKEN} if CLEAN_TOKEN else {}
         payload = {"topic": os.path.basename(outdir.rstrip("/")) or "broll",
-                   "items": [{"stable_id": sid, "platform": it.get("platform", ""),
-                              "title": it.get("title", ""), "verdict": it.get("verdict", ""),
-                              "score": it.get("score", "")} for sid, it in pairs]}
+                   "items": [_clean_item(sid, it) for sid, it in pairs]}
         try:
             r = requests.post(CLEAN_BASE + "/api/clean/start", json=payload, headers=hdr, timeout=30)
             job_id = r.json()["job_id"]
