@@ -25,10 +25,12 @@
 ## 数据契约(脚本间靠它对接,别改字段名)
 - `results/scored.json`:候选 `[{platform,title,url,page,cover,duration}]`(四平台收割产物;`duration`=整数秒,B站/YT/抖音收割时自带,小红书靠 yt-dlp 补;旧数据用 `backfill_duration.py` 回填)
 - `results/prefilter.json`:`{kill, need_enrich, need_llm}`(score_candidates.py 产)
-- `results/scores_part*.json`:语义分 `[{idx,score,scene,era,reason,need_cover}]`(AI 亲自判)
+- `results/scores_part*.json`:语义分 `[{idx,score,scene,era,reason,need_cover,person_primary,need_frames}]`(AI 亲自判;`person_primary∈{none,partial,dominant}`=R1 人物主体,`need_frames`=封面看不准需抽帧确认)
+- `results/scripts.json`:解析后的稿件 `[{script_id,persona,name,text,words}]`(接稿时 AI 产;persona 可空,name 缺则总结一个短标题)
+- `results/script_matches.json`:逐稿匹配表 `{script_id:{persona,name,words,matched:[{idx,stable_id,reason,score}]}}`(判决后 AI 产;**独占·最佳匹配**,2~5 条/稿、长稿更多;apply_verdicts 吃它做自动勾选 + 人设/稿名标签 + 欠匹配提示)
 - `results/filtered.html` + `verdicts.json`:三色判决 + 去重(apply_verdicts.py 产)。页面:卡片底中**时长角标**、右下重复角标;header **右上**=下载目录框+下载按钮;每区标题旁**一个三态全选框**(全选✓/部分=横线/空);**悬浮卡片自动播放**(B站/YT 官方 iframe、小红书走 :8788 `/preview` 代理、抖音静态封面);勾选框带 `data-plat/page/url/title/verdict/score`
-- `~/Downloads/af素材/<选题>/<平台>_<标题>_<id>.mp4` + 同目录 `_manifest.jsonl`:选片后下载产物 + 清单(download_server.py 产;**默认下到系统下载目录·按选题归类,页面顶部路径框可改,下完自动开 Finder**)。**`_manifest.jsonl` = 入库知识库对接口**,每行 `{ts,platform,stable_id,title,page,url,verdict,score,status,file,bytes,error}`(file=文件名)
-- 顺序:收割→scored.json → score_candidates.py(预过滤)→ AI 判 need_llm → apply_verdicts.py(判决+去重+封面+出页)→ 选片勾选 → download_server.py(按平台分流下载+manifest)→(后续)读 manifest 入库
+- `~/Downloads/af素材/<选题>/<口播稿名>_<平台>_<标题>_<id>.mp4` + 同目录 `_manifest.jsonl`:选片后下载产物 + 清单(download_server.py 产;**匹配到稿的带口播稿名前缀,未匹配的退回 `<平台>_<标题>_<id>`**;默认下到系统下载目录·按选题归类,页面顶部路径框可改,下完自动开 Finder)。**`_manifest.jsonl` = 入库知识库对接口**,每行 `{ts,platform,stable_id,title,page,url,verdict,score,script_name,persona,status,file,bytes,error}`(file=文件名)
+- 顺序:解析稿→scripts.json → 收割→scored.json → score_candidates.py(预过滤,含 R2 超时 kill)→ AI 判 need_llm(含 R1 person_primary)→ apply_verdicts.py(R1降分+R2超时弃+判决+去重+封面+出页)→ AI 逐稿匹配→script_matches.json → 重跑 apply_verdicts.py(吃 matches 自动勾选+人设/稿名标签)→ 选片(已自动勾好)→ download_server.py(稿名前缀分流下载+manifest)→(后续)读 manifest 入库
 
 ## 细节去哪看(单一事实源,别复制到这里)
 - `PLAN-B.md` — 轻方案总纲 + 规模化方法(量靠干净平台 小红书/B站/YT,抖音做精搜补充)+ 工具链/反爬技巧
