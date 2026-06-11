@@ -268,11 +268,19 @@ DOWNLOADERS = {"bilibili": dl_bilibili, "youtube": dl_youtube,
                "xiaohongshu": dl_xiaohongshu, "douyin": dl_douyin}
 
 
-def process(item, outdir):
+def build_name(item):
+    """文件名:有口播稿名则前缀(R4),否则 平台_标题_ID。"""
     plat = platform_of(item)
     sid = stable_id(item.get("page"), item.get("url"))
+    base = f"{PLAT_CN.get(plat, plat)}_{sanitize(item.get('title'))}_{sid}"
+    sn = (item.get("script_name") or "").strip()
+    return f"{sanitize(sn, 30)}_{base}" if sn else base
+
+
+def process(item, outdir):
+    plat = platform_of(item)
     os.makedirs(outdir, exist_ok=True)
-    name = f"{PLAT_CN.get(plat, plat)}_{sanitize(item.get('title'))}_{sid}"   # 人能看懂:平台_标题_ID
+    name = build_name(item)                  # 人能看懂:[口播稿名_]平台_标题_ID
     outbase = os.path.join(outdir, name)
     existing = _find_output(outbase)         # 幂等:已下过就跳过
     if existing and os.path.getsize(existing) > 1024:
@@ -288,6 +296,7 @@ def manifest_append(item, res, outdir):
            "stable_id": stable_id(item.get("page"), item.get("url")),
            "title": item.get("title", ""), "page": item.get("page", ""), "url": item.get("url", ""),
            "verdict": item.get("verdict", ""), "score": item.get("score", ""),
+           "script_name": item.get("script_name", ""), "persona": item.get("persona", ""),
            "status": res["status"],
            "file": (os.path.basename(res["file"]) if res.get("file") else ""),
            "bytes": res.get("bytes", 0), "error": res.get("error", "")}
