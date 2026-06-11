@@ -21,6 +21,27 @@
 - 标题信息过少时也用封面补判。
 - **不对全部候选逐张看图**(几百条不现实)——封面只做"标题定不下来时"的裁判。
 
+## 人物主体降分(R1,2026-06)
+
+> 目的:成片要和**数字人口播**混剪,真人出镜的素材会和数字人"打架"——所以**明显以人物为主体的素材降分**(不硬丢,留三色 + 人工兜底)。
+
+- 判分时对每条候选多给一个 `person_primary` 字段:
+  - `none` — 画面主体是物/景/事件(空镜、赛事画面、老物件、街景),无人物或人物只是远景陪衬。
+  - `partial` — 有人物但非绝对主体(人群、背景路人、手部特写、模糊带过)。小扣分。
+  - `dominant` — **明显以单人/说话头为主体**(采访、口播、vlog 正脸、单人占屏过半)。重扣分。
+- **识别手段**:① 默认看本地封面 `covers/{idx}.jpg`;② 封面看不准(如封面是文字卡/标题党/截图)时,把该条标 `need_frames:true`,跑 `extract_early_frames.py` 下开头 6 秒抽 3 帧到 `covers_frames/<idx>_f*.jpg`,看帧再定 `person_primary`。
+- **降分值**在 `relevance_spec.json.person_penalty`(默认 `{"dominant":35,"partial":12}`),由 `apply_verdicts.py` 确定性执行:有效分 = max(0, 原分 − penalty),再套三色阈值。改力度只改 spec 一处。
+
+## 时长规避(R2,2026-06)
+
+- 规避 **>20 分钟**(`relevance_spec.json.max_duration_sec`,默认 1200 秒)的视频:
+  - `score_candidates.py` 对**已知时长**超长的预过滤直接 kill(省 AI 打分)。
+  - `apply_verdicts.py` 在 duration 回填后,对 `duration>max_duration_sec` 的**强制判 drop**(理由"超20分钟",仍显示在灰区可查)。
+
+## 判分输出字段(scores_part*.json)
+
+每条:`{idx, score(0-100), scene, era, reason, need_cover, person_primary, need_frames}`。其中 `person_primary∈{none,partial,dominant}`、`need_frames` 为是否需抽帧确认(默认 false)。
+
 ## 阈值与产出
 
 - 默认阈值 **60**(可调):≥60 保留,<60 淘汰。
