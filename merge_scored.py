@@ -44,5 +44,17 @@ for c in net + xhs + dy:
 
 json.dump(merged, open(os.path.join(RES, "scored.json"), "w", encoding="utf-8"),
           ensure_ascii=False, indent=1)
+
+# 顺手自动产 xhs_imgs.json(note_id→{t,imgs}):下载图文笔记需它,否则 yt-dlp 把图文下成幻灯片 mp4。
+# 以前只靠 backfill_xhs_token.py 单独跑,易漏 → 现随收割合并自动产(master = xhs_raw.json)。
+raw_xhs = load("xhs_raw.json")
+if raw_xhs:
+    import xhs_imgmap
+    imgmap = xhs_imgmap.build_imgmap(raw_xhs)
+    json.dump(imgmap, open(os.path.join(RES, "xhs_imgs.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    print(f"xhs_imgs.json 自动产:{len(imgmap)} 个 note(图文走图片下载,缺则被下成幻灯片mp4)")
+else:
+    print("⚠️ 无 xhs_raw.json → 未产 xhs_imgs.json:小红书图文笔记下载会被 yt-dlp 下成幻灯片 mp4。需带 imageList 重收割小红书。")
+
 print(f"抖音死条目丢弃 {dropped}")
 print("最终 scored.json:", len(merged), dict(Counter(x["platform"] for x in merged)))

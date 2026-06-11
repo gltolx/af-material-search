@@ -7,30 +7,23 @@
   BROLL_RES=<dir> python3 backfill_xhs_token.py
 """
 import json, os, re
+import xhs_imgmap   # 共享:dec + build_imgmap(与 merge_scored.py 同一份,别重写)
 
 RES = os.environ.get("BROLL_RES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 RAW = os.path.join(RES, "xhs_raw.json")
 SCORED = os.path.join(RES, "scored.json")
 
-def dec(code):  # charCode 数字码点分隔 → 原串
-    return "".join(chr(int(x)) for x in code.split(".")) if code else ""
-
 raw = json.load(open(RAW, encoding="utf-8"))
 tokmap = {}                                          # note id -> 带 token 的完整 explore URL
 for x in raw:
-    url = dec(x.get("p", ""))
+    url = xhs_imgmap.dec(x.get("p", ""))
     m = re.search(r"/explore/([0-9a-fA-F]{12,})", url)
     if m and "xsec_token=" in url:
         tokmap[m.group(1)] = url
 print(f"重搜带 token 的唯一 note id:{len(tokmap)}")
 
 # 顺带产 id->图片URL 映射(图文笔记下载图片用;download_server 读 RES/xhs_imgs.json)
-imgmap = {}
-for x in raw:
-    url = dec(x.get("p", ""))
-    m = re.search(r"/explore/([0-9a-fA-F]{12,})", url)
-    if m:
-        imgmap[m.group(1)] = {"t": x.get("type", ""), "imgs": x.get("imgs") or []}   # 含 type:video/normal,download_server 据此决定下视频还是图片
+imgmap = xhs_imgmap.build_imgmap(raw)                 # 含 type:video/normal,download_server 据此决定下视频还是图片
 json.dump(imgmap, open(os.path.join(RES, "xhs_imgs.json"), "w", encoding="utf-8"), ensure_ascii=False)
 print(f"图文图片映射 xhs_imgs.json:{len(imgmap)} 个 note(含 type;图文走图片下载)")
 
