@@ -56,6 +56,8 @@ def parse_dur(s):  # B站搜索API的时长是不补零 M:SS(分钟可超60,如 
 
 def harvest_bili():
     log("bili", "start"); out = []
+    if os.environ.get("BROLL_NO_BILI") == "1":  # 本批不爬B站时,空返回(不回退默认词)
+        log("bili", "skip(BROLL_NO_BILI=1)"); return out
     for kw in BILI_Q:
         for page in (1, 2):
             try:

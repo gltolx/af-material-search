@@ -127,11 +127,18 @@ def dl_youtube(item, outbase):
         f = _find_output(outbase)
         if f and os.path.getsize(f) > 1024:
             return f, ""
-    # 兜底:普通 yt-dlp(可能只到 720p,但有总比无好)
+    # 兜底:普通 yt-dlp。YouTube 默认 web client 被 SABR 强制 → formats 缺 url → 403。
+    # player_client=android 直接拿到 progressive itag18(实测可下),作首选兜底;不行再退默认。
     fn, err = _ytdlp(target, outbase, [
+        "--extractor-args", "youtube:player_client=android,web_safari",
+        "--user-agent", UA,
+        "-f", "bv*+ba/b/18", "-S", "res:1080,vcodec:avc1,acodec:m4a", "--merge-output-format", "mp4"])
+    if fn:
+        return fn, ""
+    fn2, err2 = _ytdlp(target, outbase, [
         "--cookies-from-browser", "chrome", "--user-agent", UA,
         "-f", "bv*+ba/b", "-S", "res:1080,vcodec:avc1,acodec:m4a", "--merge-output-format", "mp4"])
-    return fn, (err or "")
+    return fn2, (err2 or err or "")
 
 
 _XHS_IMGS = None

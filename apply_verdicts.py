@@ -126,6 +126,23 @@ try:
 except ImportError:
     print("⚠️ 无 Pillow,跳过 pHash(只做了ID去重)。装:pip3 install --user Pillow")
 
+# 可选后处理(env 开关,不影响默认/其它批次):
+# BROLL_MAX_DUR=秒  → 时长超过它的整条从展示集剔除(无 duration 的不剔)
+# BROLL_KEEP_TOP=N → keep 只留分数最高的前 N 条,其余降级 review(高分优先)
+_maxdur = os.environ.get("BROLL_MAX_DUR")
+if _maxdur:
+    _md = int(_maxdur); _before = len(reps)
+    reps = [c for c in reps if not (isinstance(c.get("duration"), (int, float)) and c["duration"] > _md)]
+    print(f"时长 >{_md}s 剔除 {_before - len(reps)} 条")
+_keeptop = os.environ.get("BROLL_KEEP_TOP")
+if _keeptop:
+    _n = int(_keeptop)
+    _keep = [c for c in reps if c["verdict"] == "keep"]
+    _keep.sort(key=lambda x: -(x["vscore"] or 0))
+    for c in _keep[_n:]:
+        c["verdict"] = "review"; c["vreason"] = (c.get("vreason") or "") + " ·超额降级"
+    print(f"keep 收紧到前 {_n}(原 {len(_keep)} → keep {min(_n, len(_keep))},其余降 review)")
+
 json.dump(reps, open(os.path.join(RES, "verdicts.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
 from collections import Counter, defaultdict
