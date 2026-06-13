@@ -190,16 +190,16 @@ def card(c):
     dur = c.get("duration"); durb = f'<span class="badge dur">{fmt(dur)}</span>' if dur else ''
     link = e(c.get("page") or c.get("url") or "#")
     sm = IDX2SCRIPT.get(c["idx"])                                       # R3/R4:命中匹配 → 自动勾选+标签
-    # ⑥ 下前预检:按本卡 stable_id 查 dl_precheck.json;level==fail → 禁勾 + 灰红角标(缺失/非 fail = 可下)
+    # ⑥ 下前预检:按本卡 stable_id 查 dl_precheck.json;level==fail → 只提示(灰红角标),不禁勾(缺失/非 fail = 可下)
     sid = stable_id(c.get("page"), c.get("url")); pc = PRECHECK.get(sid)
     undl = bool(pc) and pc.get("level") == "fail"
     undlb = ''
     if undl:
         _rsn = (pc.get("reason") or "")[:24]
         UNDL.append((disp_plat(c), pc.get("reason") or ""))
-        undlb = '<span class="badge undl">⚠不可下载' + ((' · ' + e(_rsn)) if _rsn else '') + '</span>'
-    chk = " checked" if (sm and not undl) else ""                       # 不可下载的不自动勾选
-    dis = " disabled" if undl else ""
+        undlb = '<span class="badge undl">⚠无法下载' + ((' · ' + e(_rsn)) if _rsn else '') + '</span>'
+    chk = " checked" if sm else ""                                      # 匹配到的仍自动勾(即使标了无法下载;只提示不禁选)
+    dis = ""                                                            # 不禁选:无法下载项保持可勾选(真实可下性由选片后实测决定)
     ds = (' data-script="' + e(sm["name"]) + '" data-persona="' + e(sm.get("persona") or "") + '"') if sm else ''
     mtag = ''
     if sm:
@@ -393,7 +393,7 @@ def _undl_summary():
         main = _C(_rs).most_common(1)[0][0] if _rs else ""
         tip = "(建议重收割)" if (_p == "小红书" and ("token" in main or "映射" in main or "缺" in main)) else ""
         parts.append(f"{_p} {_n} 条" + (f":{main[:20]}" if main else "") + tip)
-    return f"⚠ {len(UNDL)} 条不可下载(已禁勾):" + " · ".join(parts)
+    return f"⚠ {len(UNDL)} 条预检无法下载(仍可勾选,真实可下性以实测为准):" + " · ".join(parts)
 _dllog_init = e(_undl_summary())
 JS = JS.replace("__DLPORT__", DLPORT).replace("__DEFAULT_DL_DIR__", DEFAULT_DL_DIR.replace("\\", "\\\\").replace('"', '\\"'))  # 仅回落默认端口/默认目录;运行期优先 fetch('./.dlport') 拿真实端口(多开各起各端口)
 doc = ('<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + e("素材关联度筛选 · " + _topic_disp) + '</title><style>' + CSS + '</style></head><body>'

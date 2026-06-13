@@ -257,14 +257,33 @@ def _xhs_ssr_direct(page, outbase):
     return None, "SSR 直链下载失败:" + err
 
 
+def _dl_xhs_video_url(video_url, outbase):
+    # 选片后浏览器抓详情页 __INITIAL_STATE__ 回填的 masterURL(CDN 直链):requests 直拉,headers 带 UA + Referer。
+    # 注意:这是 AI 在【选片后】对【选中的】小红书视频笔记逐条打开详情页实测拿到的真直链,与 yt-dlp/SSR 从
+    # Bash 出口拿到的登录墙壳不同 → 优先用它。
+    import requests
+    hdr = {"User-Agent": UA, "Referer": "https://www.xiaohongshu.com/"}
+    out = outbase + ".mp4"
+    ok, err = _dl_once(video_url, hdr, out)        # _dl_once 自带 3 次重试退避
+    if ok:
+        return out, ""
+    return None, "video_url 直链下载失败:" + err
+
+
 def dl_xiaohongshu(item, outbase):
-    # 按 type 分流:图文(normal)直接下图片;视频(video)走 yt-dlp;失败再走 SSR 直连兜底;
+    # 按 type 分流:① 已抓到 video_url(选片后浏览器抓详情页 __INITIAL_STATE__ 的 masterURL)→ requests 直拉 CDN(最优先);
+    # ② 图文(normal)直接下图片;③ 视频(video)走 yt-dlp;失败再走 SSR 直连兜底;
     # token 过期的 video / 未知类型且有图 → 降级下图(不拿封面冒充视频)
     page = item.get("page") or item.get("url")
     info = _xhs_imgs_map().get(_xhs_note_id(item)) or {}
     t = info.get("t")
     if t == "normal":
         return dl_xhs_images(item, outbase)        # 图文 → 下图片(不试视频)
+    vu = info.get("video_url")                     # video_url 由选片后浏览器抓详情页 __INITIAL_STATE__ 回填
+    if vu:
+        fnv, errv = _dl_xhs_video_url(vu, outbase) # 最优先:直拉已抓到的 masterURL
+        if fnv:
+            return fnv, ""
     fn, err = _ytdlp(page, outbase, ["--user-agent", UA])
     if fn:
         return fn, ""
@@ -518,26 +537,32 @@ def _yt_simulate(target, use_cookies=False):
     return {"ok": False, "reason": "extractor 失败:" + msg[:120], "level": "fail"}
 
 
+def _xhs_precheck(item):
+    """小红书预检:**零网络探测**(关键)。探测=下载同源请求,小红书风控敏感(刚收割完猛探必触
+    300013「访问频繁」→ 后续探测全失败 → 把能下的也假阴性标「无法下载」)。实测小红书视频 yt-dlp 能下。
+    只做纯本地、高置信判断:① 图文(t=='normal')查 xhs_imgs 映射有无 imgs;② 视频(t=='video')默认可下、
+    下载时实测;③ 无映射(t 为空)→ warn。绝不发任何网络请求(无 resolve_preview / yt-dlp)。"""
+    info = _xhs_imgs_map().get(_xhs_note_id(item)) or {}
+    t = info.get("t")
+    if t == "normal":                                # 图文:纯本地,有图即可下,无图高置信 fail
+        if info.get("imgs"):
+            return {"ok": True, "reason": "图文,本地有图片URL映射", "level": "ok"}
+        return {"ok": False, "reason": "图文无映射,带imageList重收割", "level": "fail"}
+    if t == "video":                                 # 视频:零网络,默认可下,下载时由 yt-dlp/masterURL 实测
+        return {"ok": True, "reason": "小红书视频:yt-dlp可下,下载时实测(预检不主动探避免风控)", "level": "ok"}
+    return {"ok": True, "reason": "无类型映射,建议带imageList重收割", "level": "warn"}  # 无映射:warn 不判死
+
+
 def _precheck_item(item):
-    """单条预检 → {"ok":bool,"reason":str,"level":"ok"|"warn"|"fail"}。同平台同出口成败一致,
-    抖音烧额度故按平台抽样(此处只对被抽中的条目真解),小红书因 token 逐条判。"""
+    """单条预检 → {"ok":bool,"reason":str,"level":"ok"|"warn"|"fail"}。同平台同出口成败一致。
+    小红书走零网络的 _xhs_precheck(绝不探测);B站/YT/抖音的真探测由 run_precheck 抽样调用本函数,
+    单条只发 1 次同源请求(B站/YT 用 _yt_simulate、抖音用 dy_resolve)。"""
     plat = platform_of(item)
     page = item.get("page") or item.get("url") or ""
+    if plat == "xiaohongshu":
+        return _xhs_precheck(item)                   # 小红书:零网络探测(防 300013 假阴性)
     if plat in ("bilibili", "youtube"):
         return _yt_simulate(page, use_cookies=(plat == "bilibili"))
-    if plat == "xiaohongshu":
-        info = _xhs_imgs_map().get(_xhs_note_id(item)) or {}
-        t = info.get("t")
-        if t == "normal":                            # 图文:零网络,查映射有图即可下
-            if info.get("imgs"):
-                return {"ok": True, "reason": "图文笔记,本地有图片URL映射", "level": "ok"}
-            return {"ok": False, "reason": "图文笔记但无图片URL映射(带 imageList 重收割)", "level": "fail"}
-        if not t:                                    # 无类型映射:警告(可能被下成幻灯片 mp4)
-            return {"ok": True, "reason": "无类型映射(缺xhs_imgs.json),建议重收割小红书", "level": "warn"}
-        cdn, _ = resolve_preview(page)               # 视频:用已有 resolve_preview 探 CDN 直链
-        if cdn:
-            return {"ok": True, "reason": "视频笔记,CDN 直链可解", "level": "ok"}
-        return {"ok": False, "reason": "视频笔记无法解 CDN(xhsToken可能过期,重收割刷新)", "level": "fail"}
     if plat == "douyin":
         if dy_resolve is None:
             return {"ok": False, "reason": "抖音解析不可用(未用 douyin venv python 跑)", "level": "fail"}
@@ -554,9 +579,19 @@ def _precheck_item(item):
     return {"ok": True, "reason": "未知平台,默认可下", "level": "warn"}
 
 
+# 抽样真探测的平台(同平台同出口结果一致 → 抽样而非逐条;小红书不在此列=零网络)
+_SAMPLE_PLATS = ("bilibili", "youtube", "douyin")
+_SAMPLE_N = 2          # 每平台从 keep 区取 ≤2 条做真探测(总探测数 ≤6)
+
+
 def run_precheck():
     """读 RES/verdicts.json(以 keep 区为主),对每条产预检结果,写 RES/dl_precheck.json。
-    抖音按平台抽样 1~2 条真解(其余沿用抽样结论,省解析额度);其他平台逐条。25s 单条超时、16 并发。"""
+    原则:预检只做"高置信、极低请求量"判断,绝不对刚收割完的平台猛探。
+      - 小红书:零网络探测(图文查本地映射 / 视频默认可下下载实测 / 无映射 warn)——防 300013 假阴性。
+      - B站/YT/抖音:**按平台抽样**(不是逐条)——每平台取 ≤2 条真探(B站带 cookie 用 _yt_simulate、
+        YT 用 _yt_simulate、抖音用 dy_resolve),得"样本结论"应用到该平台 keep 区全部条目(同出口一致)。
+        抽样全失败只标该平台 warn(下载实测,**不判死 fail**,避免假阴性);抽样通过→该平台全 ok。
+    低并发(max_workers≤3,反正总探测数 ≤6)。产物键=stable_id,值={ok,reason,level∈ok|warn|fail}。"""
     try:
         verds = json.load(open(os.path.join(RES, "verdicts.json"), encoding="utf-8"))
     except Exception as e:
@@ -566,46 +601,49 @@ def run_precheck():
     # 以 keep 区为主(无 keep 才退而预检全部,避免空跑)
     keeps = [it for it in verds if (it.get("verdict") or "") == "keep"]
     targets = keeps or verds
-    # 抖音抽样:同出口成败一致,真解前 2 条,其余复用抽样结论(烧额度/触限流→抽样)
-    dy_items = [it for it in targets if platform_of(it) == "douyin"]
-    dy_sample = dy_items[:2]
-    other_items = [it for it in targets if platform_of(it) != "douyin"]
 
     out = {}
-    out_lock = threading.Lock()
 
-    def _do(item):
-        sid = stable_id(item.get("page"), item.get("url"))
-        res = _precheck_item(item)
-        with out_lock:
-            out[sid] = res
+    # ① 小红书:零网络,逐条纯本地判(无并发、无请求)
+    for it in targets:
+        if platform_of(it) == "xiaohongshu":
+            out[stable_id(it.get("page"), it.get("url"))] = _xhs_precheck(it)
 
-    # 抖音:只真解抽样条,得抽样结论;其余抖音条目复用该结论(不再真解)
-    dy_verdict = None
-    if dy_sample:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            list(ex.map(lambda it: out.__setitem__(stable_id(it.get("page"), it.get("url")), _precheck_item(it)),
-                        dy_sample))
-        # 抽样里只要有一条 ok,就认为抖音出口可用(沿用给其余条目)
-        sample_results = [out[stable_id(it.get("page"), it.get("url"))] for it in dy_sample]
-        if any(s.get("ok") for s in sample_results):
-            dy_verdict = {"ok": True, "reason": "抖音抽样可解(本条沿用抽样结论)", "level": "warn"}
-        else:
-            dy_verdict = {"ok": False, "reason": "抖音抽样均不可解(KR限流/改版,本条沿用)", "level": "fail"}
-    for it in dy_items:
+    # ② B站/YT/抖音:每平台抽 ≤2 条真探,得样本结论 → 应用到该平台全部条目
+    plat_items = {p: [it for it in targets if platform_of(it) == p] for p in _SAMPLE_PLATS}
+    samples = []                                     # [(plat, item), ...] 总数 ≤ len(_SAMPLE_PLATS)*_SAMPLE_N ≤6
+    for p in _SAMPLE_PLATS:
+        for it in plat_items[p][:_SAMPLE_N]:
+            samples.append((p, it))
+
+    sample_res = {}                                  # plat -> [单条探测结果]
+    if samples:
+        # 低并发:总探测 ≤6,max_workers≤3
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(3, len(samples))) as ex:
+            results = list(ex.map(lambda pi: (pi[0], _precheck_item(pi[1])), samples))
+        for p, res in results:
+            sample_res.setdefault(p, []).append(res)
+
+    for p in _SAMPLE_PLATS:
+        items = plat_items[p]
+        if not items:
+            continue
+        res_list = sample_res.get(p) or []
+        if not res_list:                             # 该平台没抽到样本(理论上 items 非空必有样本,兜底)
+            verdict = {"ok": True, "reason": "未抽样(下载实测)", "level": "warn"}
+        elif any(r.get("ok") for r in res_list):     # 抽样有一条通过 → 该平台全 ok
+            verdict = {"ok": True, "reason": "抽样探测通过(同平台同出口一致)", "level": "ok"}
+        else:                                        # 抽样全失败 → 只 warn 不判死(避免假阴性,下载实测)
+            verdict = {"ok": True, "reason": "抽样探测未通过(可能限流/网络),下载实测", "level": "warn"}
+        for it in items:
+            out[stable_id(it.get("page"), it.get("url"))] = dict(verdict)
+
+    # ③ 其余未知平台:逐条纯本地默认判(无网络)
+    for it in targets:
         sid = stable_id(it.get("page"), it.get("url"))
-        if sid not in out and dy_verdict is not None:
-            out[sid] = dict(dy_verdict)
+        if sid not in out:
+            out[sid] = _precheck_item(it)
 
-    # 其他平台:逐条 16 并发
-    if other_items:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
-            futs = [ex.submit(_do, it) for it in other_items]
-            for fu in concurrent.futures.as_completed(futs):
-                try:
-                    fu.result()
-                except Exception:
-                    pass
     try:
         with open(os.path.join(RES, "dl_precheck.json"), "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False)
