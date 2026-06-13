@@ -67,6 +67,29 @@ def canon_id(c):
     if m: return "yt:" + m.group(1)
     nt = norm_title(c.get("title")); return ("t:" + p + ":" + nt) if len(nt) >= 4 else ("idx:" + str(c["idx"]))
 
+def stable_id(page, url):
+    # 契约4:与 download_server.stable_id 两侧逐字一致(查 dl_precheck.json / 进 manifest / 投 node2)。
+    # 兜底用 md5 而非内置 hash():hash() 受 PYTHONHASHSEED 随机化跨进程不同,本文件跑 system py3、
+    # download_server 跑 douyin venv py,兜底分支用 hash() 会两侧对不上。
+    import hashlib
+    s = (page or "") + " " + (url or "")
+    m = re.search(r"/video/(\d{10,})", s)
+    if m: return "dy_" + m.group(1)
+    m = re.search(r"/explore/([0-9a-fA-F]{12,})", s)
+    if m: return "xhs_" + m.group(1)
+    m = re.search(r"(BV[0-9A-Za-z]{8,})", s)
+    if m: return m.group(1)
+    m = re.search(r"[?&]v=([\w-]{6,})", s) or re.search(r"youtu\.be/([\w-]{6,})", s)
+    if m: return "yt_" + m.group(1)
+    return "id_" + hashlib.md5(s.encode("utf-8")).hexdigest()[:10]
+
+# ---- 下前预检(契约3):RES/dl_precheck.json,键=stable_id,值={ok,reason,level};缺失=视全可下 ----
+try:
+    PRECHECK = json.load(open(os.path.join(RES, "dl_precheck.json"), encoding="utf-8"))
+    if not isinstance(PRECHECK, dict): PRECHECK = {}
+except Exception:
+    PRECHECK = {}
+
 # ---- ID 去重 ----
 groups = {}
 for c in cands: groups.setdefault(canon_id(c), []).append(c)
@@ -158,6 +181,7 @@ def disp_plat(c):  # 展示用平台标签:把合并的 "B站/YT" 按 URL host �
     if "youtube.com" in u or "youtu.be" in u: return "YouTube"
     if "bilibili.com" in u or re.search(r"/BV[0-9A-Za-z]{8,}", u): return "B站"
     return c.get("platform", "")
+UNDL = []  # ⑥:不可下载条目汇总(供 header dllog 提示主因);[(平台, reason), ...]
 def card(c):
     cov = e(c.get("cover") or "")
     thumb = (f'<img class="im" loading="lazy" referrerpolicy="no-referrer" src="{cov}">' if cov and cov.startswith("covers/") else (f'<img class="im" loading="lazy" referrerpolicy="no-referrer" src="{cov}">' if cov else '<div class="ph">无封面</div>'))
@@ -166,21 +190,30 @@ def card(c):
     dur = c.get("duration"); durb = f'<span class="badge dur">{fmt(dur)}</span>' if dur else ''
     link = e(c.get("page") or c.get("url") or "#")
     sm = IDX2SCRIPT.get(c["idx"])                                       # R3/R4:命中匹配 → 自动勾选+标签
-    chk = " checked" if sm else ""
+    # ⑥ 下前预检:按本卡 stable_id 查 dl_precheck.json;level==fail → 禁勾 + 灰红角标(缺失/非 fail = 可下)
+    sid = stable_id(c.get("page"), c.get("url")); pc = PRECHECK.get(sid)
+    undl = bool(pc) and pc.get("level") == "fail"
+    undlb = ''
+    if undl:
+        _rsn = (pc.get("reason") or "")[:24]
+        UNDL.append((disp_plat(c), pc.get("reason") or ""))
+        undlb = '<span class="badge undl">⚠不可下载' + ((' · ' + e(_rsn)) if _rsn else '') + '</span>'
+    chk = " checked" if (sm and not undl) else ""                       # 不可下载的不自动勾选
+    dis = " disabled" if undl else ""
     ds = (' data-script="' + e(sm["name"]) + '" data-persona="' + e(sm.get("persona") or "") + '"') if sm else ''
     mtag = ''
     if sm:
         per = e(sm.get("persona") or "")
         mtag = '<div class="mtag">' + (('👤' + per + ' ｜ ') if per else '') + '📄' + e(sm["name"]) + '</div>'
-    return ('<div class="card">'
+    return ('<div class="card' + (' undl' if undl else '') + '">'
             '<a class="thumb" href="' + link + '" target="_blank" rel="noopener"'
             ' data-plat="' + e(c["platform"]) + '" data-page="' + e(c.get("page") or "") + '" data-url="' + e(c.get("url") or "")
             + '" data-cover="' + cov + '">'
-            + thumb + scb + f'<span class="badge plat">{e(disp_plat(c))}</span>{dup}{durb}'
+            + thumb + scb + f'<span class="badge plat">{e(disp_plat(c))}</span>{dup}{durb}{undlb}'
             '<label class="chk" onclick="event.stopPropagation()"><input type="checkbox" class="sel"'
             ' data-plat="' + e(c["platform"]) + '" data-page="' + e(c.get("page") or "") + '" data-url="' + e(c.get("url") or "")
             + '" data-title="' + e(c.get("title") or "") + '" data-verdict="' + e(c["verdict"])
-            + '" data-score="' + e(c["vscore"] if c["vscore"] is not None else "") + '"' + ds + chk + '></label></a>'
+            + '" data-score="' + e(c["vscore"] if c["vscore"] is not None else "") + '"' + ds + chk + dis + '></label></a>'
             '<div class="meta"><a href="' + link + '" target="_blank" rel="noopener">' + e(c.get("title") or "(无标题)") + '</a>' + mtag + '<div class="sub">' + e(c["vreason"]) + '</div></div></div>')
 def zone(items): return "".join(card(c) for c in sorted(items, key=lambda x: -(x["vscore"] or 0)))
 def zsel(zid):  # 标题行内联:一个三态全选复选框(全选✓/部分=横线/空)+ 本区已选计数;stopPropagation 防 summary 折叠
@@ -194,6 +227,7 @@ CSS = ("*{box-sizing:border-box}body{margin:0;font-family:-apple-system,'PingFan
        ".dlbtn2{background:#eef2ff;color:#3730a3;border:1px solid #c7d2fe;border-radius:7px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}.dlbtn2:hover{background:#e0e7ff}.dlbtn2:disabled{opacity:.6;cursor:default}.pickwrap{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:8px}.dirshow{font-size:11px;color:#6b7280;font-family:ui-monospace,Menlo,monospace;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}"
        ".dllog{font-size:12px;color:#374151;font-family:ui-monospace,Menlo,monospace;flex-basis:100%;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
        ".dur{left:50%;bottom:6px;transform:translateX(-50%);background:rgba(0,0,0,.78);font-weight:400;font-size:11px;font-family:ui-monospace,Menlo,monospace}"
+       ".card.undl{opacity:.6}.card.undl .thumb{filter:grayscale(.5)}.badge.undl{left:6px;top:30px;background:#b91c1c;color:#fff;font-size:11px;font-weight:600;max-width:88%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card.undl .chk{opacity:.5}"
        ".zsel{display:inline-flex;align-items:center;gap:6px;font-weight:400;font-size:13px;cursor:pointer;user-select:none;vertical-align:middle}.zsel input{width:16px;height:16px;cursor:pointer}.zcount{font-size:12px;color:#6b7280}"
        ".play{position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;z-index:5;object-fit:cover;opacity:0;transition:opacity .25s ease}.play.ready{opacity:1}")
 psum = " | ".join(f"{p} 留{platcnt[p]['keep']}/审{platcnt[p]['review']}/弃{platcnt[p]['drop']}" for p in platcnt)
@@ -202,9 +236,13 @@ _topic_disp = (spec.get("topic", "") or "").strip()[:40] or "未命名选题"  #
 DEFAULT_DL_DIR = "~/Downloads/af素材/" + _topic  # 下载默认落点(按选题归类);用户可在页面顶部改
 DLPORT = os.environ.get("DOWNLOAD_PORT", "8788")  # 与 download_server.py 同一端口(可 env 覆盖;出页 JS 据此连端点)
 JS = r"""
-(function(){
- var EP="http://127.0.0.1:8788/download", PV="http://127.0.0.1:8788/preview";
- function sels(z){return Array.prototype.slice.call(document.querySelectorAll('.grid[data-zone="'+z+'"] input.sel'));}
+(async function(){
+ /* ④ 端口运行期发现:同源读 ./.dlport(download_server 启动写真实端口),读不到/异常回落默认 __DLPORT__ */
+ var BASE="http://127.0.0.1:__DLPORT__";
+ try{ var pr=await fetch("./.dlport",{cache:"no-store"}); var pt=(await pr.text()).trim(); if(/^\d+$/.test(pt)) BASE="http://127.0.0.1:"+pt; }catch(_){}
+ var EP=BASE+"/download", PV=BASE+"/preview";
+ /* ⑥ 仅统计/操作可下(未 disabled)的 checkbox */
+ function sels(z){return Array.prototype.slice.call(document.querySelectorAll('.grid[data-zone="'+z+'"] input.sel')).filter(function(c){return !c.disabled;});}
  function refresh(){
   var tot=0;["keep","review","drop"].forEach(function(z){
    var arr=sels(z), n=arr.filter(function(c){return c.checked;}).length;
@@ -264,14 +302,15 @@ JS = r"""
  var dl=document.getElementById("dlSel"), log=document.getElementById("dllog");
  dl.addEventListener("click",async function(){
   if(picking) return;
-  var checked=Array.prototype.slice.call(document.querySelectorAll('input.sel')).filter(function(c){return c.checked;});
+  var checked=Array.prototype.slice.call(document.querySelectorAll('input.sel')).filter(function(c){return c.checked&&!c.disabled;});
   if(!checked.length){log.textContent="先勾选要下载的素材";return;}
   dl.disabled=true; picking=true; log.textContent="请选择下载文件夹…";   /* 先弹文件夹选择框,确定后再下 */
   var dir;
-  try{ var pr=await fetch("http://127.0.0.1:8788/pickdir"); dir=(await pr.text()).trim(); }
+  try{ var pr=await fetch(BASE+"/pickdir"); dir=(await pr.text()).trim(); }
   catch(_){ log.textContent="✗ 连不上下载端点,请先起 download_server.py(douyin venv python)"; dl.disabled=false; picking=false; return; }
   picking=false;
   if(!dir){ log.textContent="已取消(未选择文件夹)"; dl.disabled=false; return; }   /* 取消=不下载 */
+  lastDir=dir;   /* ① 记下本次下载目录;批量清洗复用它当 .clean_tmp 的归属目录 */
   var items=checked.map(function(c){var d=c.dataset;return {platform:d.plat,page:d.page,url:d.url,title:d.title,verdict:d.verdict,score:d.score,script_name:d.script||"",persona:d.persona||""};});
   log.textContent="开始下载 "+items.length+" 个 → "+dir;
   var ok=0,skip=0,fail=0;
@@ -295,13 +334,14 @@ JS = r"""
  /* 批量清洗:不下到本地、不弹文件夹;POST /clean → 秒回 job_id → 跳清洗页 */
  var cln=document.getElementById("clnSel");
  cln.addEventListener("click",async function(){
-  var checked=Array.prototype.slice.call(document.querySelectorAll('input.sel')).filter(function(c){return c.checked;});
+  var checked=Array.prototype.slice.call(document.querySelectorAll('input.sel')).filter(function(c){return c.checked&&!c.disabled;});
   if(!checked.length){log.textContent="先勾选要清洗的素材";return;}
   cln.disabled=true; var prev=cln.textContent; cln.textContent="清洗登记中…";
   var items=checked.map(function(c){var d=c.dataset;return {platform:d.plat,page:d.page,url:d.url,title:d.title,verdict:d.verdict,score:d.score,script_name:d.script||"",persona:d.persona||""};});
   var jobUrl=null;
   try{
-   var resp=await fetch("http://127.0.0.1:8788/clean",{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({items:items})});
+   /* ① 带 dir(复用下载目录框,与「下载选中」同源)→ .clean_tmp 落对选题、目录归类正确 */
+   var resp=await fetch(BASE+"/clean",{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify({dir:lastDir,items:items})});
    var reader=resp.body.getReader(),dec=new TextDecoder(),buf="";
    while(true){
     var r=await reader.read(); if(r.done)break;
@@ -319,12 +359,13 @@ JS = r"""
  });
  /* 选择下载文件夹:点击唤起本机原生文件夹选择器(download_server 跑 osascript choose folder),拿真实路径回填 */
  var picking=false;   /* 文件夹选择框互斥(由「下载选中」触发) */
+ var lastDir="__DEFAULT_DL_DIR__";   /* ① 下载目录(与「下载选中」同源);批量清洗复用它当 .clean_tmp 归属;下载选中后会被真实选中目录覆盖 */
  /* 滚动预解析:小红书卡片进视野就让 /preview 后台现解+缓存 CDN,悬浮时秒开(抖音不预解,省 KR 解析额度;B站/YT iframe 无需) */
  var warmed={}, warmActive=0, warmQ=[];
  function pumpWarm(){
   while(warmActive<3 && warmQ.length){
    var pg=warmQ.shift(); warmActive++;
-   fetch("http://127.0.0.1:8788/preview?warm=1&page="+encodeURIComponent(pg)).catch(function(){}).then(function(){ warmActive--; pumpWarm(); });
+   fetch(BASE+"/preview?warm=1&page="+encodeURIComponent(pg)).catch(function(){}).then(function(){ warmActive--; pumpWarm(); });
   }
  }
  if("IntersectionObserver" in window){
@@ -339,17 +380,32 @@ JS = r"""
  refresh();
 })();
 """
-JS = JS.replace("127.0.0.1:8788", "127.0.0.1:" + DLPORT)  # 端口随 DOWNLOAD_PORT 走,换机/改端口出页 JS 也连得上
+# 先渲染三区(card 内会填充 UNDL),再据此算不可下汇总 + 占位替换
+_zk = zone(keep); _zr = zone(review); _zd = zone(drop)
+# ⑥ header dllog 汇总不可下条数与主因(如"小红书 N 条 token过期/缺映射,建议重收割")
+def _undl_summary():
+    if not UNDL: return ""
+    from collections import Counter as _C
+    plat_cnt = _C(p for p, _r in UNDL); reasons = _C(r for _p, r in UNDL)
+    parts = []
+    for _p, _n in plat_cnt.most_common():
+        _rs = [r for pp, r in UNDL if pp == _p and r]
+        main = _C(_rs).most_common(1)[0][0] if _rs else ""
+        tip = "(建议重收割)" if (_p == "小红书" and ("token" in main or "映射" in main or "缺" in main)) else ""
+        parts.append(f"{_p} {_n} 条" + (f":{main[:20]}" if main else "") + tip)
+    return f"⚠ {len(UNDL)} 条不可下载(已禁勾):" + " · ".join(parts)
+_dllog_init = e(_undl_summary())
+JS = JS.replace("__DLPORT__", DLPORT).replace("__DEFAULT_DL_DIR__", DEFAULT_DL_DIR.replace("\\", "\\\\").replace('"', '\\"'))  # 仅回落默认端口/默认目录;运行期优先 fetch('./.dlport') 拿真实端口(多开各起各端口)
 doc = ('<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + e("素材关联度筛选 · " + _topic_disp) + '</title><style>' + CSS + '</style></head><body>'
        f'<header><div class="hleft"><h1>素材关联度语义筛选 · {e(_topic_disp)}</h1><div class="note">共{len(reps)}条 · 🟢留{len(keep)}/🟡审{len(review)}/⚪弃{len(drop)} · {e(psum)}</div>'
        + (f'<div class="note" style="color:#b45309">⚠ 欠匹配(&lt;2条,建议补搜):{e("、".join(UNDERMATCHED))}</div>' if UNDERMATCHED else '')
        + '</div>'
        '<div class="hright"><button id="dlSel" class="dlbtn" disabled>⬇ 下载选中 (0)</button>'
        '<button id="clnSel" class="dlbtn" disabled>🧹 批量清洗选中 (0)</button>'
-       '<span id="dllog" class="dllog"></span></div></header>'
-       f'<main><h2>🟢 KEEP {len(keep)} {zsel("keep")}</h2><div class="grid" data-zone="keep">{zone(keep)}</div>'
-       f'<details open><summary>🟡 REVIEW {len(review)} {zsel("review")}</summary><div class="grid" data-zone="review">{zone(review)}</div></details>'
-       f'<details><summary>⚪ DROP {len(drop)}(可展开查误杀) {zsel("drop")}</summary><div class="grid" data-zone="drop">{zone(drop)}</div></details></main>'
+       f'<span id="dllog" class="dllog">{_dllog_init}</span></div></header>'
+       f'<main><h2>🟢 KEEP {len(keep)} {zsel("keep")}</h2><div class="grid" data-zone="keep">{_zk}</div>'
+       f'<details open><summary>🟡 REVIEW {len(review)} {zsel("review")}</summary><div class="grid" data-zone="review">{_zr}</div></details>'
+       f'<details><summary>⚪ DROP {len(drop)}(可展开查误杀) {zsel("drop")}</summary><div class="grid" data-zone="drop">{_zd}</div></details></main>'
        '<script>' + JS + '</script></body></html>')
 open(os.path.join(RES, "filtered.html"), "w", encoding="utf-8").write(doc)
 print(f"原{len(cands)} → ID去重 -{id_dups} → 封面pHash去重 -{ph_dups} → 剩 {len(reps)}")

@@ -61,9 +61,10 @@ CHROME_COOKIES="$HOME/Library/Application Support/Google/Chrome/Default/Cookies"
 if [ -f "$CHROME_COOKIES" ]; then ok "Chrome cookies DB 在(B站下载 --cookies-from-browser chrome 可用;带 cookie 解锁 1080P)"; else
   warn "没找到 Chrome Default cookies DB → B站下载(第8步)会 412/只 480P。让用户用 Chrome 登录 B站并保持开着。"; fi
 
-# 9) 下载/落盘端口(被占则 download_server :8788 / writer_server :8799 起不来或出页连错进程)。警告级。
-for P in 8788 8799; do
-  if lsof -ti :"$P" >/dev/null 2>&1; then warn "端口 $P 已被占 → 该端点起不来/出页可能连错进程(改 DOWNLOAD_PORT 或先 kill 占用进程)。"; fi
+# 9) 下载/落盘/选片端口(download_server 8788 / writer_server 8799 / 选片页 http.server 8765)。
+#    多开为常态:三个 server 都已端口自适应(被占自动向上顺延),被占不阻塞、不需手动改端口。警告级提示而已。
+for P in 8788 8799 8765; do
+  if lsof -ti :"$P" >/dev/null 2>&1; then warn "端口 $P 已被占 → 多开为常态,本会话端口自动顺延(各 server 写 .dlport/.writerport 旁车,出页运行期读真实端口),**勿 kill 他人进程**(kill 正在边下边传的活进程会让 node2 那条永卡 loading);并行多会话各用独立 BROLL_RES。"; fi
 done
 
 echo "== 自检结束 =="
