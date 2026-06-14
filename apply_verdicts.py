@@ -10,6 +10,7 @@ spec = json.load(open(os.path.join(RES, "relevance_spec.json"), encoding="utf-8"
 PT = spec.get("plat_thresholds", {}); DEFT = {"keep_hi": 60, "review_lo": 40}
 MAXDUR = int(spec.get("max_duration_sec", 1200))                    # R2:>此秒数(默认20分钟)直接弃
 PEN = spec.get("person_penalty", {"dominant": 35, "partial": 12})   # R1:人物主体降分,spec 可覆盖
+DROP_EYE = bool(spec.get("drop_eye_contact", True))                 # R1b:正面半身/全身人脸+眼神盯镜头 → 硬丢开关(默认开)
 cands = json.load(open(os.path.join(RES, "candidates.json"), encoding="utf-8"))
 scores = {}
 for f in sorted(glob.glob(os.path.join(RES, "scores_part*.json"))):
@@ -38,6 +39,8 @@ def verdict(c):
     if c["stage0"] == "kill": return "drop", "负面:" + c.get("kill_reason", ""), None
     if c["stage0"] == "need_enrich": return "review", "小红书空标题·待看封面", (s.get("score") if s else None)
     if not s: return "review", "未判分", None
+    if s.get("eye_contact") and DROP_EYE:                           # R1b:正面半身/全身人脸+眼神盯镜头 → 硬丢(在软降权前短路,封面待定也照丢)
+        return "drop", "正面人像·眼神看镜头", s.get("score")
     sc = s.get("score"); rsn = (s.get("reason") or "")[:40]
     pp = s.get("person_primary") or "none"                          # R1:none/partial/dominant
     if pp in ("dominant", "partial") and sc is not None:

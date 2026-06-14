@@ -23,9 +23,13 @@ n=0
 for base in "$HOME/.claude/skills" "$HOME/.codex/skills"; do
   parent="$(dirname "$base")"                 # ~/.claude 或 ~/.codex
   [ -d "$parent" ] || continue               # 该客户端没装就跳过(不硬造目录)
-  mkdir -p "$base/broll"
-  sed "s|{{BROLL_HOME}}|$ROOT|g" "$SRC" > "$base/broll/SKILL.md"   # 盖章 + 覆盖 = 可重跑
-  echo "  装到 $base/broll/SKILL.md"
+  for sk in "$ROOT"/skills/*/SKILL.md; do     # 遍历所有技能(broll / broll-auto / ...)
+    [ -f "$sk" ] || continue
+    name="$(basename "$(dirname "$sk")")"
+    mkdir -p "$base/$name"
+    sed "s|{{BROLL_HOME}}|$ROOT|g" "$sk" > "$base/$name/SKILL.md"   # 盖章 + 覆盖 = 可重跑
+    echo "  装到 $base/$name/SKILL.md"
+  done
   n=$((n + 1))
 done
 [ "$n" -eq 0 ] && echo "  [警告] 没找到 ~/.claude 或 ~/.codex —— 先装 Claude/Codex 客户端,再重跑本脚本。"

@@ -26,7 +26,7 @@
 - `results/scored.json`:候选 `[{platform,title,url,page,cover,duration}]`(四平台收割产物;`duration`=整数秒,B站/YT/抖音收割时自带,小红书靠 yt-dlp 补;旧数据用 `backfill_duration.py` 回填)
 - `results/xhs_imgs.json`:小红书 `{note_id:{t(type:normal/video),imgs:[原图URL]}}`(merge_scored.py 从 xhs_raw.json **自动产**,backfill_xhs_token.py 也产;download_server 据 `t` 决定图文下图片/视频走 yt-dlp。**缺它则图文笔记被 yt-dlp 下成幻灯片 mp4**)
 - `results/prefilter.json`:`{kill, need_enrich, need_llm}`(score_candidates.py 产)
-- `results/scores_part*.json`:语义分 `[{idx,score,scene,era,reason,need_cover,person_primary,need_frames}]`(AI 亲自判;`person_primary∈{none,partial,dominant}`=R1 人物主体,`need_frames`=封面看不准需抽帧确认)
+- `results/scores_part*.json`:语义分 `[{idx,score,scene,era,reason,need_cover,person_primary,need_frames,eye_contact}]`(AI 亲自判;`person_primary∈{none,partial,dominant}`=R1 人物主体,`need_frames`=封面看不准需抽帧确认,`eye_contact`=正面半身/全身人脸且眼神盯镜头→R1b 由 apply_verdicts 硬丢)
 - `results/scripts.json`:解析后的稿件 `[{script_id,persona,name,text,words}]`(接稿时 AI 产;persona 可空,name 缺则总结一个短标题)
 - `results/script_matches.json`:逐稿匹配表 `{script_id:{persona,name,words,matched:[{idx,stable_id,reason,score}]}}`(判决后 AI 产;**独占·最佳匹配**;**配额按口播稿总数 N 分档**:N≥10→2~5/稿(常态)、5≤N≤9→4~6/稿、N<5→5~7/稿(少稿多配),同档内长稿取偏上限;apply_verdicts 吃它做自动勾选 + 人设/稿名标签 + 欠匹配提示)
 - `results/filtered.html` + `verdicts.json`:三色判决 + 去重(apply_verdicts.py 产)。页面:卡片底中**时长角标**、右下重复角标;header **右上**=下载目录框+下载按钮;每区标题旁**一个三态全选框**(全选✓/部分=横线/空);**悬浮卡片自动播放**(B站/YT 官方 iframe、小红书走 :8788 `/preview` 代理、抖音静态封面);勾选框带 `data-plat/page/url/title/verdict/score`

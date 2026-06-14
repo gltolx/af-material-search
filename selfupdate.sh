@@ -22,13 +22,14 @@ main(){
   if git merge --ff-only -q "origin/$BR" 2>/dev/null; then
     echo "  [已更新] 快进到 origin/$BR(${REMOTE:0:7})"
     # 代码靠绝对路径引用即时生效;顺带把技能文案重新盖章进各客户端,文案也跟上
-    SRC="$ROOT/skills/broll/SKILL.md"
-    if [ -f "$SRC" ]; then
-      for d in "$HOME/.claude/skills/broll" "$HOME/.codex/skills/broll"; do
-        [ -d "$(dirname "$(dirname "$d")")" ] || continue   # 该客户端没装就跳过
-        mkdir -p "$d"; sed "s|{{BROLL_HOME}}|$ROOT|g" "$SRC" > "$d/SKILL.md" 2>/dev/null && echo "  [已更新] 技能文案 → $d/SKILL.md"
+    for sk in "$ROOT"/skills/*/SKILL.md; do                 # 遍历所有技能(broll / broll-auto / ...)
+      [ -f "$sk" ] || continue
+      name="$(basename "$(dirname "$sk")")"
+      for base in "$HOME/.claude/skills" "$HOME/.codex/skills"; do
+        [ -d "$(dirname "$base")" ] || continue             # 该客户端没装就跳过
+        mkdir -p "$base/$name"; sed "s|{{BROLL_HOME}}|$ROOT|g" "$sk" > "$base/$name/SKILL.md" 2>/dev/null && echo "  [已更新] 技能文案 → $base/$name/SKILL.md"
       done
-    fi
+    done
   else
     echo "  [警告] 本地有未提交改动或已分叉,无法自动快进 → 用本地代码继续(需手动:git stash && git pull --ff-only,或 git pull --rebase)"
   fi

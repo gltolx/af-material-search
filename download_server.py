@@ -103,15 +103,19 @@ def _find_output(outbase):
     d, base = os.path.dirname(outbase), os.path.basename(outbase)
     if not os.path.isdir(d): return None
     cands = [f for f in os.listdir(d) if f.startswith(base + ".") and not f.endswith(".part")]
-    if not cands: return None
-    return os.path.join(d, max(cands, key=lambda f: os.path.getsize(os.path.join(d, f))))
+    # 排除 yt-dlp 中间分片(.fNNNNN.):合并成功会删掉它们,残留=视频流没下全/没合并成功。
+    # 别把残留音轨(如 .f30280.m4a)当成片返回——否则会上传给 node2 清洗音频必失败(2026-06 实测坑)。
+    merged = [f for f in cands if not re.search(r"\.f\d+\.", f)]
+    if not merged: return None
+    return os.path.join(d, max(merged, key=lambda f: os.path.getsize(os.path.join(d, f))))
 
 
 def _ytdlp(target, outbase, extra):
     cmd = [YTDLP, "--no-warnings", "--no-playlist", "--ffmpeg-location", FFMPEG,
            "-o", outbase + ".%(ext)s", "--no-overwrites", "--continue",
            "--retries", "10", "--fragment-retries", "10", "--retry-sleep", "3",
-           "--socket-timeout", "40", "--concurrent-fragments", "4"] + extra + [target]
+           "--socket-timeout", "40", "--concurrent-fragments", "4",
+           "--http-chunk-size", "10M"] + extra + [target]   # 分块 range 请求:抗 B站/YT 大视频流从韩国 IP 被 CDN 掐断(SSL EOF 截断,2026-06 实测坑)
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except subprocess.TimeoutExpired:

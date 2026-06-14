@@ -32,6 +32,13 @@
 - **识别手段**:① 默认看本地封面 `covers/{idx}.jpg`;② 封面看不准(如封面是文字卡/标题党/截图)时,把该条标 `need_frames:true`,跑 `extract_early_frames.py` 下开头 6 秒抽 3 帧到 `covers_frames/<idx>_f*.jpg`,看帧再定 `person_primary`。
 - **降分值**在 `relevance_spec.json.person_penalty`(默认 `{"dominant":35,"partial":12}`),由 `apply_verdicts.py` 确定性执行:有效分 = max(0, 原分 − penalty),再套三色阈值。改力度只改 spec 一处。
 
+## 正面盯镜头硬过滤(R1b,2026-06)
+
+> R1 软降权不保证筛掉;**正面半身/全身人脸且眼睛盯镜头**的真人出镜与数字人混剪最冲突,直接硬丢(不只是降权)。
+
+- 判分时对每条多给一个布尔 `eye_contact`。**全部满足才置 true**:① **真抽到帧**(封面看不准就靠 `need_frames` 抽帧;抽不到帧则**不**置 true,不拿单缩略图硬判);② **正面**(脸基本朝镜头,非纯侧脸/背身);③ **半身或全身**(人占画面主体,非远景陪衬);④ **人脸清晰**;⑤ **眼睛在 ≥2/3 帧锁定直视镜头**(across-frames,专治"开头 2~3 秒看镜头随即切空镜"的好素材误杀)。
+- `apply_verdicts.py` 对 `eye_contact=true` **直接判 drop**(理由"正面人像·眼神看镜头";在 R1 软降权**之前**短路,**封面待定 `need_cover` 项也照丢**)。开关 `relevance_spec.json.drop_eye_contact`(默认 true)。
+
 ## 时长规避(R2,2026-06)
 
 - 规避 **>20 分钟**(`relevance_spec.json.max_duration_sec`,默认 1200 秒)的视频:
@@ -40,7 +47,7 @@
 
 ## 判分输出字段(scores_part*.json)
 
-每条:`{idx, score(0-100), scene, era, reason, need_cover, person_primary, need_frames}`。其中 `person_primary∈{none,partial,dominant}`、`need_frames` 为是否需抽帧确认(默认 false)。
+每条:`{idx, score(0-100), scene, era, reason, need_cover, person_primary, need_frames, eye_contact}`。其中 `person_primary∈{none,partial,dominant}`、`need_frames` 为是否需抽帧确认(默认 false)、`eye_contact` 为正面半身/全身人脸且眼神盯镜头(默认 false,true 则 apply_verdicts 硬丢)。
 
 ## 阈值与产出
 
