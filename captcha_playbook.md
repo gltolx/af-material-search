@@ -20,6 +20,12 @@
 - **小红书 CLI**:`json.ok===false` 或 stderr 含 `Captcha`。
 - **B站/YT**:目前无;保留 detectCaptcha 钩子以防改道。
 检测到 `blocked` → **立即 `computer` 截屏存档**到 `BROLL_RES/captcha_shots/{platform}_{type}_{kw}_{epoch}.png` + 追加 `manifest.jsonl`(给人核验,不是给机器解)。
+> **⚠️ 必做·立即在本机弹真窗叫人(2026-06-16 用户硬要求,实测可用)**:检测到验证码的**那一刻**就跑下面这条 Bash,在 Mac 上弹实体窗 + 响铃。**只在对话里打字"请去过码"=用户看不到=等于没实现**。
+> ```bash
+> osascript -e 'display notification "检测到验证码拦截,请到 Chrome 处理" with title "⚠ broll 验证码拦截" sound name "Glass"'
+> osascript -e 'display dialog "检测到 抖音/小红书 验证码拦截。\n请切到 Chrome 当前标签页手动过码,完成后回来告诉我继续。" with title "⚠ broll 验证码拦截 — 需你手动过码" buttons {"知道了"} default button 1 giving up after 30 with icon caution'
+> ```
+> `giving up after 30` 让窗 30s 自动消失,不卡住 Bash;按钮返回值可忽略。弹完再走 `AskUserQuestion` 等用户。**登录态缺失打断点(B站/YT 缺 cookie)同理弹窗。**
 **三态判别(防把撞码/空态误落 0):** `ok=true && items/cards=[]` = 真没结果(不退避);`ok=false` 或撞码文案命中 = 撞码(暂停+喊人);其余 0 结果 = 软失败(下轮重试)。
 > ⚠️ 上面 DOM 选择器是**宽松匹配**(基于实测文案 + 通用风控特征;仓库暂无真实撞码 HTML 现场)。**下次真撞码时顺手存一张截图 + 当时的码弹窗 DOM 节点,据真实结构把选择器收窄一次**,会更准。
 

@@ -16,6 +16,9 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "*")
+        # 新版 Chrome 对 公网域名页面→loopback 强制 Private Network Access 预检,
+        # 必须回这个头,否则 fetch 直接 "Failed to fetch"(收割落盘桥全废)。向后兼容、不需要的浏览器忽略。
+        self.send_header("Access-Control-Allow-Private-Network", "true")
     def do_OPTIONS(self):
         self.send_response(200); self._cors(); self.end_headers()
     def do_POST(self):

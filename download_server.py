@@ -110,21 +110,58 @@ def _find_output(outbase):
     return os.path.join(d, max(merged, key=lambda f: os.path.getsize(os.path.join(d, f))))
 
 
-def _ytdlp(target, outbase, extra):
-    cmd = [YTDLP, "--no-warnings", "--no-playlist", "--ffmpeg-location", FFMPEG,
-           "-o", outbase + ".%(ext)s", "--no-overwrites", "--continue",
-           "--retries", "10", "--fragment-retries", "10", "--retry-sleep", "3",
-           "--socket-timeout", "40", "--concurrent-fragments", "4",
-           "--http-chunk-size", "10M"] + extra + [target]   # 分块 range 请求:抗 B站/YT 大视频流从韩国 IP 被 CDN 掐断(SSL EOF 截断,2026-06 实测坑)
+def _video_truncated(path):
+    """视频流实际时长/容器时长 < 0.9 → 判为残片(并发下载被 CDN 掐断的静默截断:前几秒有画面、后面黑屏、音频满长)。
+    本机常无 ffprobe → 用 ffmpeg 实解码取末帧 pts(**别用 -c copy/容器索引**,残片照样报满时长会漏判)。
+    <5s 短片不判(避免误判);checker 自身异常→返回 False 不阻塞下载(只兜底,不误杀)。"""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    except subprocess.TimeoutExpired:
-        return None, "yt-dlp 超时(600s)"
-    f = _find_output(outbase)
-    if f and os.path.getsize(f) > 1024:
-        return f, ""
-    tail = (p.stderr or p.stdout or "").strip().splitlines()
-    return None, ("yt-dlp rc=%d %s" % (p.returncode, tail[-1] if tail else ""))[:200]
+        p = subprocess.run([FFMPEG, "-hide_banner", "-i", path], capture_output=True, text=True, timeout=60)
+        m = re.search(r"Duration:\s*(\d+):(\d+):([0-9.]+)", p.stderr or "")
+        if not m:
+            return False
+        cdur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        if cdur < 5:
+            return False
+        p2 = subprocess.run([FFMPEG, "-hide_banner", "-nostats", "-i", path, "-map", "0:v:0",
+                             "-vf", "showinfo", "-f", "null", "-"], capture_output=True, text=True, timeout=600)
+        pts = re.findall(r"pts_time:([0-9.]+)", p2.stderr or "")
+        if not pts:
+            return True
+        return (float(pts[-1]) / cdur) < 0.9
+    except Exception:
+        return False
+
+
+def _ytdlp(target, outbase, extra, verify=False):
+    # 并发掐断防护(2026-06 实测:max_workers×concurrent-fragments 过多→B站/CDN 对单 IP 掐流→--http-chunk-size 把"没下全"
+    # 静默变成"容器满时长但视频只到前几秒"的残片→播完前几秒黑屏)。对策:verify=True 时下载后量"视频末帧/容器时长",
+    # 残片则删档、降到单分片 cf=1 + 递增节流重试(让 CDN 冷却),最多 3 轮;仍残片才返回失败(可被流水线识别替换)。
+    last = ""
+    for attempt in range(3):
+        cfrag = "4" if attempt == 0 else "1"   # 重试降单分片连接,避并发掐断
+        cmd = [YTDLP, "--no-warnings", "--no-playlist", "--ffmpeg-location", FFMPEG,
+               "-o", outbase + ".%(ext)s", "--no-overwrites", "--continue",
+               "--retries", "10", "--fragment-retries", "10", "--retry-sleep", "3",
+               "--socket-timeout", "40", "--concurrent-fragments", cfrag,
+               "--http-chunk-size", "10M"] + extra + [target]
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            last = "yt-dlp 超时(600s)"; time.sleep(2 + attempt * 3); continue
+        f = _find_output(outbase)
+        if f and os.path.getsize(f) > 1024:
+            if verify and _video_truncated(f):
+                last = "视频流截断(残片·并发掐断)"
+                for g in glob.glob(outbase + "*"):
+                    try: os.remove(g)
+                    except Exception: pass
+                time.sleep(2 + attempt * 3)
+                continue
+            return f, ""
+        tail = (p.stderr or p.stdout or "").strip().splitlines()
+        last = ("yt-dlp rc=%d %s" % (p.returncode, tail[-1] if tail else ""))[:200]
+        time.sleep(2 + attempt * 3)
+    return None, last
 
 
 def dl_bilibili(item, outbase):
@@ -133,7 +170,7 @@ def dl_bilibili(item, outbase):
         "--cookies-from-browser", "chrome", "--user-agent", UA,
         "--add-header", "Referer:https://www.bilibili.com/",
         "-f", "bv*+ba/b", "-S", "res:1080,vcodec:avc1,acodec:m4a",
-        "--merge-output-format", "mp4"])
+        "--merge-output-format", "mp4"], verify=True)   # B站:下载后量完整性,残片自动删档重下
 
 
 YTDLP_NEW = os.path.expanduser("~/.local/bin/yt-dlp-new")   # 2026.03.17 独立二进制 + deno 本地 PO-token 破 SABR(见记忆 youtube-1080p-sabr-bypass)
@@ -153,7 +190,7 @@ def dl_youtube(item, outbase):
         except subprocess.TimeoutExpired:
             pass
         f = _find_output(outbase)
-        if f and os.path.getsize(f) > 1024:
+        if f and os.path.getsize(f) > 1024 and not _video_truncated(f):
             return f, ""
     # 兜底:普通 yt-dlp。YouTube 高清的关键是 web 登录态(Chrome 登录了 YouTube 就有高清,没登录才 360p,同 B站逻辑)。
     # → android client 兜底也带 --cookies-from-browser chrome(用拍板②:登录态拿高清,源无高清才退低清)。
@@ -161,12 +198,12 @@ def dl_youtube(item, outbase):
         "--cookies-from-browser", "chrome",
         "--extractor-args", "youtube:player_client=android,web_safari",
         "--user-agent", UA,
-        "-f", "bv*+ba/b/18", "-S", "res:1080,vcodec:avc1,acodec:m4a", "--merge-output-format", "mp4"])
+        "-f", "bv*+ba/b/18", "-S", "res:1080,vcodec:avc1,acodec:m4a", "--merge-output-format", "mp4"], verify=True)
     if fn:
         return fn, ""
     fn2, err2 = _ytdlp(target, outbase, [
         "--cookies-from-browser", "chrome", "--user-agent", UA,
-        "-f", "bv*+ba/b", "-S", "res:1080,vcodec:avc1,acodec:m4a", "--merge-output-format", "mp4"])
+        "-f", "bv*+ba/b", "-S", "res:1080,vcodec:avc1,acodec:m4a", "--merge-output-format", "mp4"], verify=True)
     return fn2, (err2 or err or "")
 
 
@@ -967,7 +1004,7 @@ class H(BaseHTTPRequestHandler):
 
         try:
             # ⑥ 串行改并发:单条卡 600/900s 不再阻塞全批;_line 已加锁线程安全
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=int(os.environ.get("BROLL_DL_WORKERS", "7"))) as ex:   # 默认 7(用户拍板·2026-06-17):2 太慢饿着 node2、10 触发 B站限流大面积download_fail,7 是海外IP下"喂饱node2又不掐流"的甜点区;env BROLL_DL_WORKERS 可调
                 futs = []
                 for idx, (sid, it) in enumerate(pairs):
                     if flag.is_set():
