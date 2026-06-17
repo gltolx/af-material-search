@@ -40,7 +40,7 @@ description: 口播稿 → B-roll 素材 全自动一条龙(af-material-search)�
      ~/.local/share/uv/tools/douyin-mcp-server/bin/python {{BROLL_HOME}}/autorun_kb.py \
      --account <入库email> --kb "<知识库名>" --res <RES>
    ```
-   `autorun_kb.py` 自动做:**①库名校验 fail-fast**(0/多同名→具名 abort,不猜库)→ **②跨run去重**(读 `_autorun_manifest.jsonl` 的 `(kb_id,stable_id)` 已 uploaded 跳过)→ **③ POST /clean 触发清洗**(边下边清,首行 error→abort)→ **④轮询 node2 到 finished**(无进展看门狗 25min + 整 job 硬超时;卡住条记 orphan 不入库、已 done 继续)→ **⑤ kb-upload**(只传 done 的 **key**)→ **⑥轮询 kb_status 到 uploaded/failed**(独立第二道硬超时)→ **⑦写 `_autorun_manifest.jsonl` + 打印汇总 + 进度页 URL**。
+   `autorun_kb.py` 自动做:**①库名校验 fail-fast**(0/多同名→具名 abort,不猜库)→ **②跨run去重**(读 `_autorun_manifest.jsonl` 的 `(kb_id,stable_id)` 已 uploaded 跳过)→ **③ POST /clean 触发清洗**(边下边清,首行 error→abort)→ **④交织轮询·边洗边传**(每条清洗 done 即刻 kb-upload 入库,逐条不等全批;退出=node2 finished 且无 kb 在途,照抄 app.py:539)→ **⑤三道防线**(清洗 stall 看门狗 25min + kb stall 看门狗 12min + 整 job 硬超时;卡住条记非 uploaded 不入库、已入库/已 done 继续)→ **⑥写 `_autorun_manifest.jsonl` + 打印汇总 + 进度页 URL**。
 3. **盯全程**:run_in_background 跑 autorun_kb,持续 tail 它的 stdout(`[autorun] ...` 进度行);末尾会打印进度页 `https://tool.alphafin.world/?job=<job_id>`,可开浏览器看每条 待清洗→清洗中→完成。
 
 ## 用哪个 Python(铁律)

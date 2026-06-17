@@ -8,14 +8,14 @@
      跨 run 去重:读 RES/_autorun_manifest.jsonl,(kb_id,stable_id) 已 uploaded 的跳过(不再重清洗/重入库)。
   2. 触发清洗:复用本机 download_server 的 /clean(读 RES/.dlport 拿真实端口)→ POST {items,dir} →
      读 NDJSON 流:首行 event==error → 整批 abort;event==start → 拿 job_id(整批一个);边下边清。
-  3. 等清洗完成:轮询 {node2}/api/jobs/<job_id> 到 status=="finished"(所有 file 到 done/failed/cancelled)。
-     **双保险防挂**:无进展看门狗(快照 STALL_S 不变且未 finished → 判卡死,仅卡住条记 orphan,已 done 继续)
-     + 整 job 硬超时 HARD_S。node2 的 processing 无服务端 reaper,这里是唯一防线。
-  4. 收集成功项:取 files 中 status=="done" 的 **key**(= 可读名,不是 out!),内嵌 stable_id 对账。
-  5. 入库:POST {node2}/api/jobs/<job_id>/kb-upload {email,kb_id,items:[done keys]}(无需 clean token,job_id 即凭证)。
-     返回 {queued,count};queued 可 < 发送数(被去重/非done跳过)→ 以 queued 为准。
-  6. 等入库:再轮询 files[key].kb_status 到 uploaded/failed(独立第二道硬超时;kb 也无服务端 reaper)。
-  7. 写 RES/_autorun_manifest.jsonl 台账(每行带 kb_id,= 去重依据 + 入库留痕)+ 打印汇总。
+  3. 交织轮询·边洗边传:每 tick 拉 {node2}/api/jobs/<job_id>——发现新 status=="done" 的 **key** 即刻
+     POST .../kb-upload(逐条不等全批;无需 clean token,job_id 即凭证;node2 端点幂等去重,本地 submitted 去抖)。
+     退出 = status=="finished" 且 无文件 kb_status∈{queued,uploading}(照抄 node2 app.py:539)。
+     **三道防线**(node2 的 processing/kb_status 都无服务端 reaper,客户端是唯一防线):清洗 stall 看门狗
+     (未终态清洗快照 CLEAN_STALL_S 不变→判卡)+ kb stall 看门狗(清洗完后在途 kb 快照 KB_STALL_S 不变→判卡)
+     + 整 job 硬超时 HARD_S(清洗预算+kb尾段预算)。卡住条记非 uploaded 不入库,已 uploaded/已 done 继续。
+  4. 按 stable_id 聚回每条最终 {cstat,kstat}(严格取自 node2 快照),供台账 + 重试判定。
+  5. 写 RES/_autorun_manifest.jsonl 台账(每行带 kb_id,= 去重依据 + 入库留痕)+ 打印汇总。
 
 **必须用 douyin venv python 跑**(它有 requests):
   MATCLEAN_CLEAN_URL=https://tool.alphafin.world ~/.local/share/uv/tools/douyin-mcp-server/bin/python \
@@ -33,10 +33,10 @@ except Exception as e:                                   # 必须 douyin venv py
 NODE2 = os.environ.get("MATCLEAN_CLEAN_URL", "https://tool.alphafin.world").rstrip("/")
 HTTP_T = 60                                              # 所有出站请求统一超时(秒),绝不裸等
 # 防挂死参数(node2 的 processing / kb_status 都无服务端 reaper,客户端兜底)
-CLEAN_POLL_S = 10
+POLL_S = int(os.environ.get("AUTORUN_POLL_S", "8"))     # 统一轮询间隔(清洗10/kb6 折中)
 CLEAN_STALL_S = 25 * 60                                  # 清洗快照连续无变化 → 判卡死
-KB_POLL_S = 6
-KB_STALL_S = 12 * 60
+KB_STALL_S = 12 * 60                                     # kb 在途快照连续无变化 → 判卡死
+KB_FAIL_MAX = int(os.environ.get("AUTORUN_KB_FAIL_MAX", "5"))  # kb-upload 连续失败达此 → 熔断停发只继续洗
 _TERMINAL = ("done", "failed", "cancelled")             # node2 文件终态(app.py:85)
 _KB_TERMINAL = ("uploaded", "failed")                   # kb_status 终态(app.py:190/197)
 
@@ -163,47 +163,91 @@ def trigger_clean(dlport, items, outdir):
     return job_id, items_seen
 
 
-def _snap_sig(files):
-    """快照指纹:文件状态 + 进度,用于无进展看门狗。"""
-    return tuple(sorted((k, f.get("status"), f.get("elapsed"), f.get("kb_pct")) for k, f in files.items()))
+def _clean_sig(files):
+    """清洗看门狗指纹:仅未终态清洗文件的 (status, elapsed)。"""
+    return tuple(sorted((k, f.get("status"), f.get("elapsed"))
+                        for k, f in files.items() if f.get("status") not in _TERMINAL))
 
 
-def poll_clean(job_id, n_expected):
-    """轮询 node2 到 status==finished。双保险防挂。返回最终 files 快照(dict)。"""
+def _kb_sig(files):
+    """入库看门狗指纹:仅在途 kb 文件的 (kb_status, kb_pct)。"""
+    return tuple(sorted((k, f.get("kb_status"), f.get("kb_pct"))
+                        for k, f in files.items() if f.get("kb_status") in ("queued", "uploading")))
+
+
+def poll_clean_and_upload(job_id, n_expected, account, kb_id):
+    """交织轮询:边洗边传。每 tick 拉 node2 job 快照——
+      (a) 新 done 且未提交过的 key → 立即 kb-upload(本地 submitted 去抖;POST 失败下 tick 重发;连续失败→熔断);
+      (b) 退出 = node2 finished 且 无 kb 在途(照抄 app.py:539,C1);
+      (c) 双独立看门狗:清洗 stall(盯未终态清洗)/ kb stall(仅在清洗已完后盯在途 kb)(C2);
+      (d) 整 job 硬超时兜底。
+    返回最终 files 快照(含各文件 status/kb_status,由 _aggregate_round 取终值,C3)。"""
     base = NODE2 + "/api/jobs/" + job_id
-    hard_s = max(2 * 3600, n_expected * 12 * 60)        # 整 job 硬超时
-    t0 = time.time(); last_sig = None; last_change = t0
+    hard_s = max(2 * 3600, n_expected * 12 * 60) + max(30 * 60, n_expected * 90)   # 清洗预算+kb尾段预算(兜底)
+    t0 = time.time()
+    submitted = set()                                   # 已成功 POST(queued 返回含)的 key,仅作去抖(C4)
+    kb_fail_streak = 0; kb_circuit_open = False
+    clean_sig = kb_sig = None; clean_change = kb_change = t0; last_files = {}
     while True:
         try:
             code, body = get_json(base)
         except Exception as e:
-            log("轮询 /api/jobs 异常(重试):" + str(e)[:100]); time.sleep(CLEAN_POLL_S);
+            log("轮询 /api/jobs 异常(重试):" + str(e)[:100]); time.sleep(POLL_S)
             if time.time() - t0 > hard_s:
-                log("清洗硬超时(连轮询都拿不到),放弃等待"); return {}
+                log("硬超时(连轮询都拿不到),放弃等待"); return last_files
             continue
         if code == 410:
-            log("job 已过期(node2 3天清理),停止轮询"); return {}
+            log("job 已过期(node2 3天清理),停止轮询"); return last_files
         if code != 200 or not isinstance(body, dict):
-            log("轮询返回异常 HTTP %s,稍后重试" % code); time.sleep(CLEAN_POLL_S); continue
-        files = body.get("files") or {}
-        status = body.get("status")
-        done_n = sum(1 for f in files.values() if f.get("status") == "done")
-        term_n = sum(1 for f in files.values() if f.get("status") in _TERMINAL)
-        sig = _snap_sig(files)
-        now = time.time()
-        if sig != last_sig:
-            last_sig = sig; last_change = now
-            log("清洗进度 finished=%s  done=%d/%d  终态=%d/%d" % (status == "finished", done_n, len(files), term_n, len(files)))
-        if status == "finished":
-            log("✅ 清洗全部终态 finished"); return files
-        if now - last_change > CLEAN_STALL_S:
+            log("轮询返回异常 HTTP %s,稍后重试" % code); time.sleep(POLL_S); continue
+        files = body.get("files") or {}; last_files = files
+        status = body.get("status"); now = time.time()
+        # (a) 边洗边传
+        new_done = [k for k, f in files.items() if f.get("status") == "done" and k not in submitted]
+        just_submitted = False
+        if new_done and not kb_circuit_open:
+            queued, err = kb_upload(job_id, account, kb_id, new_done)
+            if err:
+                kb_fail_streak += 1
+                log("kb-upload 失败(连续 %d):%s" % (kb_fail_streak, err))
+                if kb_fail_streak >= KB_FAIL_MAX:
+                    kb_circuit_open = True
+                    log("⚠️ kb-upload 连续失败 %d 次,熔断:停发,只继续清洗轮询" % kb_fail_streak)
+            else:
+                submitted |= set(queued); kb_fail_streak = 0
+                if queued:
+                    just_submitted = True
+                    log("边洗边传:本tick入库提交 %d 条(submitted 累计 %d)" % (len(queued), len(submitted)))
+        # 刚提交过 → 本 tick 快照已过期(提交前 GET 的),下 tick 再拉新状态判退出/看门狗,
+        # 否则会在"最后一条刚 done 即 finished"那 tick 用旧快照误判"无 kb 在途"而早退漏入库(C1)。
+        if just_submitted:
+            time.sleep(POLL_S); continue
+        # 进度日志 + 双看门狗计时
+        csig = _clean_sig(files); ksig = _kb_sig(files)
+        clean_pending = any(f.get("status") not in _TERMINAL for f in files.values())
+        kb_inflight = any(f.get("kb_status") in ("queued", "uploading") for f in files.values())
+        if csig != clean_sig or ksig != kb_sig:
+            done_n = sum(1 for f in files.values() if f.get("status") == "done")
+            up_n = sum(1 for f in files.values() if f.get("kb_status") == "uploaded")
+            log("进度 finished=%s done=%d/%d 已入库=%d/%d" % (status == "finished", done_n, len(files), up_n, len(files)))
+        if csig != clean_sig: clean_sig = csig; clean_change = now
+        if ksig != kb_sig: kb_sig = ksig; kb_change = now
+        # (b) 成功退出(C1)
+        if status == "finished" and not kb_inflight:
+            log("✅ 清洗全部终态 且 无 kb 在途,收尾"); return files
+        # (c) 双看门狗(C2):清洗卡死随时判;kb 卡死仅在清洗已完后判(否则继续洗,别因 kb 卡放弃在洗的)
+        if clean_pending and now - clean_change > CLEAN_STALL_S:
             stuck = [k for k, f in files.items() if f.get("status") not in _TERMINAL]
-            log("⚠️ 清洗无进展 %d 分钟,判卡死。卡住条记 orphan 不入库,已 done 条继续:%s" % (CLEAN_STALL_S // 60, stuck[:8]))
+            log("⚠️ 清洗无进展 %d 分钟,判卡死,停等;已 done 继续入库:%s" % (CLEAN_STALL_S // 60, stuck[:8]))
             return files
+        if not clean_pending and kb_inflight and now - kb_change > KB_STALL_S:
+            stuck = [k for k, f in files.items() if f.get("kb_status") in ("queued", "uploading")]
+            log("⚠️ 入库无进展 %d 分钟,判卡死,停等;未终态记非 uploaded:%s" % (KB_STALL_S // 60, stuck[:8]))
+            return files
+        # (d) 硬超时兜底
         if now - t0 > hard_s:
-            log("⚠️ 清洗硬超时(%d分钟),停止等待,已 done 条继续入库" % (hard_s // 60))
-            return files
-        time.sleep(CLEAN_POLL_S)
+            log("⚠️ 整 job 硬超时(%d分钟),停等" % (hard_s // 60)); return files
+        time.sleep(POLL_S)
 
 
 def kb_upload(job_id, account, kb_id, keys):
@@ -218,39 +262,39 @@ def kb_upload(job_id, account, kb_id, keys):
     return (body.get("queued") or []), None
 
 
-def poll_kb(job_id, queued_keys):
-    """轮询 files[key].kb_status 到 uploaded/failed。独立第二道硬超时。返回 {key: kb_status}。"""
-    base = NODE2 + "/api/jobs/" + job_id
-    hard_s = max(30 * 60, len(queued_keys) * 90)
-    t0 = time.time(); last_sig = None; last_change = t0
-    result = {}
-    qset = set(queued_keys)
-    while True:
-        try:
-            code, body = get_json(base)
-        except Exception as e:
-            log("轮询 kb_status 异常(重试):" + str(e)[:100]); time.sleep(KB_POLL_S)
-            if time.time() - t0 > hard_s:
-                return result
-            continue
-        if code != 200 or not isinstance(body, dict):
-            time.sleep(KB_POLL_S); continue
-        files = body.get("files") or {}
-        cur = {k: (files.get(k) or {}).get("kb_status") for k in qset}
-        done = {k: v for k, v in cur.items() if v in _KB_TERMINAL}
-        sig = tuple(sorted(cur.items()))
-        now = time.time()
-        if sig != last_sig:
-            last_sig = sig; last_change = now
-            up = sum(1 for v in cur.values() if v == "uploaded")
-            fl = sum(1 for v in cur.values() if v == "failed")
-            log("入库进度 uploaded=%d failed=%d / %d" % (up, fl, len(qset)))
-        if len(done) == len(qset):
-            return cur
-        if now - last_change > KB_STALL_S or now - t0 > hard_s:
-            log("⚠️ 入库无进展/超时,停止等待;未终态记 timeout")
-            return cur
-        time.sleep(KB_POLL_S)
+def _aggregate_round(items, files, job_id):
+    """把 node2 最终 files 快照按 stable_id 聚回每条 item 的 {cstat,kstat,key,job_id,err}。
+    kstat/cstat 严格取自快照(C3);无 key→orphan;done 但 kb 在途/超时→kstat 非 uploaded(C6,_retryable 不重投)。"""
+    out = {}
+    key2sid = {k: (files.get(k) or {}).get("stable_id") for k in files}
+    for it in items:
+        sid = it["_sid"]
+        key = next((k for k, s in key2sid.items() if s == sid), None)
+        f = files.get(key) or {}
+        cstat = f.get("status") if key else "orphan"
+        out[sid] = {"cstat": cstat or "orphan", "kstat": f.get("kb_status") if key else None,
+                    "key": key, "job_id": job_id, "err": f.get("err", "") if key else ""}
+    return out
+
+
+def _clean_round(items, kb_id, account, outdir, res):
+    """一轮 清洗+边洗边传入库:触发清洗 → 交织轮询(每条 done 即入库)→ 按 sid 聚合。
+    返回 ({_sid: {cstat,kstat,key,job_id,err}}, job_id)。job_id=None 表示触发失败。"""
+    job_id, info = trigger_clean(dlport_required(res), items, outdir)
+    if not job_id:
+        log("❌ 本轮清洗触发失败:" + str(info))
+        return {}, None
+    files = poll_clean_and_upload(job_id, len(items), account, kb_id)
+    done_n = sum(1 for f in files.values() if f.get("status") == "done")
+    up_n = sum(1 for f in files.values() if f.get("kb_status") == "uploaded")
+    log("本轮:清洗 done %d/%d,入库 uploaded %d" % (done_n, len(items), up_n))
+    return _aggregate_round(items, files, job_id), job_id
+
+
+def _retryable(r):
+    # 可安全重投 = 清洗未成功(含下载失败的假失败)或 kb 明确 failed;
+    # kb 在途/超时(已 done 但 kstat 未终态)不重投——避免它其实已上传造成重复入库
+    return r.get("cstat") != "done" or r.get("kstat") == "failed"
 
 
 def main():
@@ -306,61 +350,65 @@ def main():
     if args.dry_run:
         log("--dry-run:到此为止(库名 OK,选中集 OK)"); return
 
-    # 2. 触发清洗
-    sid2item = {it["_sid"]: it for it in fresh}
-    job_id, info = trigger_clean(dlport_required(res), fresh, outdir)
-    if not job_id:
-        log("❌ ABORT(清洗触发):" + info); sys.exit(5)
+    # 2~6. 清洗+入库(自动重试:每轮把"未入库且可安全重试"的失败子集重新发清洗任务,
+    #       直到 失败 ≤ 容忍阈值 / 无改善 / 轮次封顶。解决"下载失败→清洗失败"高频脆弱点,无人值守自愈)
+    FAIL_TOL = int(os.environ.get("AUTORUN_FAIL_TOLERANCE", "3"))   # 允许 ≤N 条最终失败(用户拍板 2026-06-17:3)
+    MAX_ROUNDS = int(os.environ.get("AUTORUN_MAX_ROUNDS", "4"))     # 重试轮次封顶,防顽固失败死循环
 
-    # 3. 等清洗完成(双保险防挂)
-    files = poll_clean(job_id, len(fresh))
-
-    # 4. 收集 done 的 key(从快照取,勿客户端重构;用内嵌 stable_id 对账)
-    done_keys = [k for k, f in files.items() if f.get("status") == "done"]
-    key2sid = {k: (files.get(k) or {}).get("stable_id") for k in files}
-    log("清洗完成:done %d 条 / 本批 %d 条" % (len(done_keys), len(fresh)))
-
-    # 5. 入库(只传 done 的 key)
-    kb_status_map = {}
-    if done_keys:
-        queued, err = kb_upload(job_id, args.account, kb_id, done_keys)
-        if err:
-            log("❌ 入库提交失败:" + err)
-        else:
-            log("入库已提交 queued=%d(发送 %d)" % (len(queued), len(done_keys)))
-            # 6. 等入库
-            kb_status_map = poll_kb(job_id, queued) if queued else {}
+    agg = {}            # _sid -> {cstat,kstat,key,job_id,err}(后轮覆盖前轮)
+    last_job = None
+    pending = list(fresh)
+    prev_retryable = None
+    rnd = 0
+    while rnd < MAX_ROUNDS:
+        rnd += 1
+        log(("清洗轮次 1" if rnd == 1 else "🔁 自动重试 第 %d 轮" % rnd) + "/%d:本轮 %d 条" % (MAX_ROUNDS, len(pending)))
+        round_res, last_job = _clean_round(pending, kb_id, args.account, outdir, res)
+        if last_job is None:
+            log("⚠️ 本轮清洗触发失败,停止重试"); break
+        agg.update(round_res)
+        not_up = [it for it in fresh if agg.get(it["_sid"], {}).get("kstat") != "uploaded"]
+        retryable = [it for it in not_up if _retryable(agg.get(it["_sid"], {}))]
+        log("第 %d 轮后:未入库 %d 条(其中可安全重试 %d)" % (rnd, len(not_up), len(retryable)))
+        if len(not_up) <= FAIL_TOL:
+            log("✅ 全部入库" if not not_up else "剩 %d 条失败 ≤ 容忍阈值 %d,可接受,停止重试" % (len(not_up), FAIL_TOL)); break
+        if not retryable:
+            log("⚠️ 剩 %d 条无法安全重试(kb 在途/超时,重投恐重复入库),停止" % len(not_up)); break
+        if prev_retryable is not None and len(retryable) >= prev_retryable:
+            log("⚠️ 本轮无改善(可重试 %d→%d),判顽固失败,停止重试" % (prev_retryable, len(retryable))); break
+        prev_retryable = len(retryable)
+        pending = retryable
     else:
-        log("无 done 条目,跳过入库")
+        log("⚠️ 达重试轮次上限 %d,停止" % MAX_ROUNDS)
 
-    # 7. 写台账 + 汇总
+    # 7. 写台账(每条原始 fresh 取最终聚合状态)+ 汇总
     n_up = n_fail = n_clean_fail = 0
     ts = int(time.time())
     with open(manifest_path, "a", encoding="utf-8") as mf:
         for it in fresh:
             sid = it["_sid"]
-            key = next((k for k, s in key2sid.items() if s == sid), None)
-            cstat = (files.get(key) or {}).get("status") if key else "orphan"
-            kstat = kb_status_map.get(key) if key else None
+            r = agg.get(sid, {})
+            key = r.get("key"); cstat = r.get("cstat") or "orphan"; kstat = r.get("kstat")
             if cstat != "done":
                 n_clean_fail += 1
             if kstat == "uploaded":
                 n_up += 1
-            elif key and key in kb_status_map and kstat != "uploaded":
+            elif kstat and kstat != "uploaded":
                 n_fail += 1
             mf.write(json.dumps({
                 "ts": ts, "kb_id": kb_id, "platform": it.get("platform", ""),
                 "script_name": it.get("script_name", ""), "stable_id": sid,
-                "key": key, "clean_status": cstat or "unknown",
-                "kb_status": kstat or ("timeout" if key in (kb_status_map or {}) else ("not_done" if cstat != "done" else "n/a")),
+                "key": key, "clean_status": cstat,
+                "kb_status": kstat or ("not_done" if cstat != "done" else "n/a"),
                 "audit": it.get("audit", "pass"), "title": (it.get("title") or "")[:80],
-                "err": (files.get(key) or {}).get("err", "") if key else "",
+                "err": r.get("err", ""),
             }, ensure_ascii=False) + "\n")
 
     log("===== 汇总 =====")
-    log("入库成功 uploaded=%d  入库失败/超时=%d  清洗未成功=%d  跨run去重跳过=%d" % (n_up, n_fail, n_clean_fail, skipped_dup))
+    log("入库成功 uploaded=%d  入库失败/超时=%d  清洗未成功=%d  跨run去重跳过=%d  清洗轮次=%d" % (n_up, n_fail, n_clean_fail, skipped_dup, rnd))
     log("台账:%s" % manifest_path)
-    log("进度页:%s/?job=%s" % (NODE2, job_id))
+    if last_job:
+        log("进度页:%s/?job=%s" % (NODE2, last_job))
 
 
 def dlport_required(res):
