@@ -1,4 +1,4 @@
-# af-material-search — 项目契约(新会话先读本文件)
+# af-material-search — Claude Code + Codex 项目契约(新会话先读本文件)
 
 **做什么:** 给一批口播稿 → 跨平台(抖音/小红书/B站/YouTube)搜 B-roll 素材 → 关联度**语义**打分 → 三色筛选(keep/review/drop)→ 选片 →(后续)入库到素材清洗知识库。
 

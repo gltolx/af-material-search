@@ -1,4 +1,4 @@
-# /broll 使用说明 · Claude 用户
+# /broll 使用说明 · Claude Code 用户
 
 > ⚠️ **必须用 Claude Code(本机版:终端 CLI 或 VS Code 扩展)。**
 > **不能**用 claude.ai 网页 / Claude 桌面 App / claude.ai/code 网页版——这些是**云端**,技能在云沙箱里跑,碰不到你本机的 Chrome、工具和下载目录,这个技能用不了。
@@ -19,7 +19,7 @@ bash install.sh             # 装技能到 ~/.claude/skills + 装环境(yt-dlp/f
 看到 `✅ READY` 即可。红灯多半是没登录/没装 Chrome,按提示修。
 
 ## 登录(一次,人工)
-在 Chrome 登录 **小红书 / B站 / 抖音**(采集账号),保持 Chrome 开着。
+在 Chrome 登录 **小红书 / B站 / 抖音 / YouTube**(采集账号),保持 Chrome 开着。B站/YouTube 高清下载依赖 Chrome web 登录态。
 
 ## 用
 1. `cd` 进 `af-material-search` 目录,打开 Claude Code。

@@ -1,10 +1,10 @@
 # /broll 使用说明 · Codex 用户
 
-> Codex 是本机 CLI,能跑这个技能。它没有 Claude-in-Chrome,小红书/抖音收割改用 **Chrome DevTools MCP** 挂一个专用采集 Chrome(install.sh 自动配好)。
+> Codex 本机版能跑这个技能。它没有 Claude-in-Chrome,小红书/抖音收割改用 **Chrome DevTools MCP** 挂一个专用采集 Chrome(install.sh 自动配好)。不支持任何碰不到本机 Chrome/下载目录的云端运行时。
 
 ## 前置
 - macOS + Google Chrome
-- Codex CLI(`codex --version`)+ 你的 Codex 订阅
+- Codex CLI / Codex App 本机环境(`codex --version` 可用)+ 你的 Codex 订阅
 - **node / npx**(MCP 运行时;`npx --version` 有即可)
 
 ## 安装(一次)
@@ -20,7 +20,8 @@ bash install.sh             # 装技能到 ~/.codex/skills + 建 AGENTS.md + 装
 ```bash
 bash codex_chrome.sh        # 起专用采集 Chrome(独立窗口,带调试端口;不动你日常 Chrome)
 ```
-- **首次**:在弹出的窗口登录 **小红书 / B站 / 抖音**(登录态持久存,后续复用)。
+- **首次**:在弹出的窗口登录 **小红书 / B站 / 抖音 / YouTube**(登录态持久存,后续复用)。B站/YouTube 高清下载依赖 Chrome web 登录态。
+- **不要打开裸 `http://127.0.0.1:9222/`**:那是 DevTools 调试端口,不是选片页。健康检查用 `http://127.0.0.1:9222/json/version`;真正需要人工操作的是 `codex_chrome.sh` 弹出的采集 Chrome 窗口。
 - **确认走国内节点**:收割前让 Codex 跑一句 `evaluate fetch('https://myip.ipip.net')`,地域要在中国大陆;不在就设 `CODEX_HARVEST_PROXY` 指到落地大陆的代理后重跑 `codex_chrome.sh`。
 
 ## 用
@@ -30,7 +31,7 @@ bash codex_chrome.sh        # 起专用采集 Chrome(独立窗口,带调试端�
 
 ## 缺什么 / 注意
 - 收割节奏 ≥8s/词(抖音 ≥10s),避验证码。
-- 采集 Chrome 必须先 `codex_chrome.sh` 起着,Codex 才连得上(MCP 配的是 `--browserUrl http://127.0.0.1:9222`)。
+- 采集 Chrome 必须先 `codex_chrome.sh` 起着,Codex 才连得上(MCP 配的是 `--browserUrl http://127.0.0.1:9222`;用 `/json/version` 查健康状态)。
 - 下载/打分/出页全平台可用(含小红书/抖音,只要收割时拿到了带 token 的页)。
 
 ## 更新
