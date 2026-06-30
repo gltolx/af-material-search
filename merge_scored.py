@@ -19,6 +19,13 @@ dy_raw = load("harvest_douyin.json")
 dy = [x for x in dy_raw if (x.get("title") or "").strip() or (x.get("cover") or "")]
 dropped = len(dy_raw) - len(dy)
 
+# ---- 中性垫片池(filler)平行收割产物(单独文件;无则空,主题流程零影响)----
+# filler 只投抖音+小红书(B站暂不进),各自落 *_filler.json;同一视频若两池都召回,theme 优先(见下方先 theme 后 filler)。
+xhs_f = load("harvest_xhs_filler.json")
+dy_f_raw = load("harvest_douyin_filler.json")
+dy_f = [x for x in dy_f_raw if (x.get("title") or "").strip() or (x.get("cover") or "")]
+dropped += len(dy_f_raw) - len(dy_f)
+
 def canon(c):
     u = (c.get("page") or "") + " " + (c.get("url") or ""); p = c["platform"]
     if p == "抖音":
@@ -34,20 +41,23 @@ def canon(c):
     return "raw:" + p + ":" + (c.get("page") or c.get("url") or c.get("title") or "")[:40]
 
 merged, seen = [], set()
-for c in net + xhs + dy:
-    k = canon(c)
-    if k in seen: continue
-    seen.add(k)
-    merged.append({"platform": c["platform"], "title": c.get("title", ""),
-                   "url": c.get("url", ""), "page": c.get("page", ""), "cover": c.get("cover", ""),
-                   "duration": c.get("duration")})
+# 先 theme 后 filler:同一 canon 跨池只收第一次出现的 → theme 永远赢(避免把主题相关画面误标成 filler)。
+for _pool, _src in (("theme", net + xhs + dy), ("filler", xhs_f + dy_f)):
+    for c in _src:
+        k = canon(c)
+        if k in seen: continue
+        seen.add(k)
+        merged.append({"platform": c["platform"], "title": c.get("title", ""),
+                       "url": c.get("url", ""), "page": c.get("page", ""), "cover": c.get("cover", ""),
+                       "duration": c.get("duration"), "src_pool": _pool})
 
 json.dump(merged, open(os.path.join(RES, "scored.json"), "w", encoding="utf-8"),
           ensure_ascii=False, indent=1)
 
 # 顺手自动产 xhs_imgs.json(note_id→{t,imgs}):下载图文笔记需它,否则 yt-dlp 把图文下成幻灯片 mp4。
 # 以前只靠 backfill_xhs_token.py 单独跑,易漏 → 现随收割合并自动产(master = xhs_raw.json)。
-raw_xhs = load("xhs_raw.json")
+# filler 放行小红书图文,其类型映射也来自带 imageList 的收割原始档(xhs_raw_filler.json)→ 合并进同一张 xhs_imgs.json。
+raw_xhs = (load("xhs_raw.json") or []) + (load("xhs_raw_filler.json") or [])
 if raw_xhs:
     import xhs_imgmap
     imgmap = xhs_imgmap.build_imgmap(raw_xhs)
@@ -56,5 +66,6 @@ if raw_xhs:
 else:
     print("⚠️ 无 xhs_raw.json → 未产 xhs_imgs.json:小红书图文笔记下载会被 yt-dlp 下成幻灯片 mp4。需带 imageList 重收割小红书。")
 
+_npool = Counter(x.get("src_pool", "theme") for x in merged)
 print(f"抖音死条目丢弃 {dropped}")
-print("最终 scored.json:", len(merged), dict(Counter(x["platform"] for x in merged)))
+print("最终 scored.json:", len(merged), dict(Counter(x["platform"] for x in merged)), "| 池:", dict(_npool))
