@@ -17,7 +17,8 @@
 2. Claude Code 与 Codex 只在浏览器驱动层分叉,下游产物文件名和 schema 完全一致。
 3. Codex 浏览器轨必须 attach 到 `127.0.0.1:9222` 的专用真人 Chrome profile,不能退回 MCP 默认自动化 Chrome。
 4. 项目契约改成 agent-neutral:Claude Code 和 Codex 都读得懂,运行时差异放在明确的适配层里。
-5. 新增最小可信测试矩阵,覆盖安装、同步、MCP 配置、Chrome 启动和 schema 同构,不跑真实重爬。
+5. `broll-auto` 的阶段二契约保持完整:自动选中、分库路由、清洗、入库、跨 run 去重、降级/跳过、审查排除都不能因兼容改造退化。
+6. 新增最小可信测试矩阵,覆盖安装、同步、MCP 配置、Chrome 启动、schema 同构和 `broll-auto` 关键产物,不跑真实重爬。
 
 ## 非目标
 
@@ -82,11 +83,15 @@
 - 没有 `[mcp_servers.chrome-devtools]` 时注册:
   `codex mcp add chrome-devtools -- npx -y chrome-devtools-mcp@1.4.0 --slim --browserUrl http://127.0.0.1:9222 --no-usage-statistics --no-performance-crux`
 - 已有配置时检查 `--browserUrl`、`http://127.0.0.1:9222`、`--slim` 是否存在。
-- 如果已有配置不符合目标,给出明确修复提示或用安全的配置更新路径修正,不能静默跳过。
+- 如果已有配置不符合目标,默认不静默跳过。修复策略按风险分级:
+  - 若 `codex mcp remove chrome-devtools` 和 `codex mcp add ...` 均可用,脚本先打印将执行的修复,备份 `~/.codex/config.toml` 为带时间戳的 `.bak`,再移除旧 server 并重加目标配置。
+  - 若 Codex CLI 不支持 remove/update,脚本只报黄灯并打印手工修复命令,不直接用脆弱文本替换破坏用户自定义配置。
+  - 每次修复后提示用户重启 Codex 会话或重载 MCP,因为当前会话可能已经加载旧 server。
+- MCP 包版本固定为 `chrome-devtools-mcp@1.4.0`。以后升级必须显式改脚本和测试,不使用 `@latest` 静默漂移。
 
 Codex 验收以 MCP evaluate 为准:
 
-- `navigator.webdriver` 应为 false 或至少不表现为 MCP 默认自动化 profile。
+- `navigator.webdriver` 应为 false,且进程列表不应出现采集用的 `~/.cache/chrome-devtools-mcp/chrome-profile`。若 MCP evaluate 可用,还要确认它连接的是 `--browserUrl http://127.0.0.1:9222`。
 - `fetch('https://myip.ipip.net').then(r => r.text())` 在采集 Chrome 内确认出口为中国大陆。
 
 ### 3. Skill 文案和项目契约
@@ -109,11 +114,17 @@ Codex 验收以 MCP evaluate 为准:
 - 阶段一继承 `/broll`。
 - 覆盖打断策略:不等待用户登录/过码,能自动恢复则继续,不能恢复则降级/跳过并记日志。
 - 阶段二追加 `autorun_selected.json`、`kb_routing.json`、`autorun_kb.py`。
+- 阶段二兼容验收必须覆盖:
+  - `build_autorun_selected.py` 能从 `verdicts.json`、`script_matches.json`、可选 `filler_matches.json` 产出 `autorun_selected.json`。
+  - 分库时 `kb_routing.json` 的 `source_link/account/kb_name/script_ids` 能盖到自动选中项。
+  - 选中项保留 `pool`、`from_script`、`script_name`、`persona`、`audit` 字段,供清洗/入库/RAG 隔离使用。
+  - `broll-auto` 的验证码/登录态策略仍是无人值守:时间盒恢复,失败则跳过平台或降级并写日志,不等待用户。
+  - `autorun_kb.py` 的 node2 清洗、逐链接串行、跨 run `(kb_id, stable_id)` 去重、单条失败不中断整批等契约不因文案精简而丢失。
 
 `CLAUDE.md` 继续作为 Claude Code 入口文件,同时通过 `AGENTS.md` 软链给 Codex 读取。内容改成项目契约而非 Claude 专用说明:
 
 - 保留同步/自检、Python 选择、uv 禁令、数据契约索引。
-- 删除或弱化动态端口、下载命名、悬浮播放等易漂移细节,改为指向 `skills/broll/SKILL.md`。
+- 将动态端口、`.writerport` / `.dlport`、下载命名、manifest 字段、悬浮预览端点等细节从 `CLAUDE.md` 收敛到 `skills/broll/SKILL.md` 作为单一事实源。它们不是可选能力,只是避免在 `CLAUDE.md` 双写漂移。
 - 修正“7 步流水线”等过期表述。
 
 `USAGE-Claude.md` 和 `USAGE-Codex.md` 只放用户准备步骤:
@@ -129,7 +140,9 @@ Codex 验收以 MCP evaluate 为准:
 - `tests/test_selfupdate_safe.py`:本地临时 git/bare origin 验证 selfupdate 不阻塞且刷新 skill。
 - `tests/test_setup_codex_browser.py`:fake `codex`/`npx` 验证 MCP 注册和已有错误配置检测。
 - `tests/test_codex_chrome.py`:fake Chrome/curl/open 验证启动参数、proxy 参数、端口复用、陈旧 Singleton 处理。
-- `tests/test_browser_schema_compat.py`:用模拟 `dy_raw.json`/`xhs_raw.json` 验证 Codex/Claude raw 产物下游 schema 同构。
+- `tests/test_browser_schema_compat.py`:用模拟 `dy_raw.json`/`xhs_raw.json` 验证 Codex/Claude raw 产物下游 schema 同构,覆盖 `duration`、小红书 `imageList -> xhs_imgs.json`、`src_pool`、filler raw 文件、SID/BROLL_RES 隔离后的固定落盘名。
+- `tests/test_broll_auto_compat.py`:用小 fixture 验证 `build_autorun_selected.py` 保留 theme/filler、分库路由、审查字段和入库所需字段;不触发真实 node2。
+- 文案 lint:禁止 `AskUserQuestion`、`Claude 绝不`、`Codex 旁注`、过期固定 `:8788` 作为当前流程事实出现。
 
 手工 smoke:
 
@@ -141,12 +154,14 @@ Codex 验收以 MCP evaluate 为准:
 6. Codex MCP evaluate `navigator.webdriver`
 7. Codex MCP evaluate `fetch('https://myip.ipip.net').then(r=>r.text())`
 8. 打开小红书/抖音搜索页做一次 render 探活和验证码检测,不做全量重爬。
+9. 用本地 fixture 跑 `build_autorun_selected.py`,确认 `autorun_selected.json` 中 theme/filler、分库路由和审查字段仍完整。
 
 ## 风险和防线
 
 - 高风险:Codex MCP 配置漂移。防线:安装时检查 `--browserUrl`/`--slim`,测试覆盖错误配置。
 - 高风险:skill 副本漂移。防线:`sync_skills.sh` 单一入口,`selfupdate.sh` 每次刷新,`preflight.sh` 黄灯。
-- 高风险:浏览器 raw schema 分叉。防线:Codex/Claude adapter 后的文件名和字段契约写进 skill,并用 fixture 测试。
+- 高风险:浏览器 raw schema 分叉。防线:Codex/Claude adapter 后的文件名和字段契约写进 skill,并用 fixture 测试 `duration`、`imageList`、`xhs_imgs.json`、`src_pool`、filler 和 SID/BROLL_RES。
+- 高风险:`broll-auto` 阶段二退化。防线:skill 明确继承和覆盖边界,fixture 测试 `autorun_selected.json`、`kb_routing.json` 和入库字段,手工 smoke 不触发真实 node2 但验证本地编排输入完整。
 - 中风险:Chrome profile/端口复用错误。防线:`codex_chrome.sh` 检查 profile、清理陈旧 Singleton、只认 `/json/version`。
 - 中风险:Python 环境混用。防线:保留现有铁律,测试入口按 system python 与 douyin venv python 分组。
 
@@ -157,4 +172,6 @@ Codex 验收以 MCP evaluate 为准:
 - Codex `chrome-devtools` MCP attach 到 `127.0.0.1:9222`,不再默认启动自动化 Chrome profile。
 - `codex_chrome.sh` 启动后 `curl http://127.0.0.1:9222/json/version` 稳定返回。
 - `broll` / `broll-auto` 文案无 Claude 专有工具名误导 Codex。
+- `broll-auto` 本地 fixture 能产出包含分库、theme/filler、审查和入库字段的 `autorun_selected.json`。
+- Codex raw fixture 能覆盖小红书图文映射、duration、src_pool/filler 和 SID/BROLL_RES 隔离。
 - 新增轻测试通过,现有业务测试不回归。
