@@ -67,6 +67,18 @@ for P in 8788 8799 8765; do
   if lsof -ti :"$P" >/dev/null 2>&1; then warn "端口 $P 已被占 → 多开为常态,本会话端口自动顺延(各 server 写 .dlport/.writerport 旁车,出页运行期读真实端口),**勿 kill 他人进程**(kill 正在边下边传的活进程会让 node2 那条永卡 loading);并行多会话各用独立 BROLL_RES。"; fi
 done
 
+# 10) skill 副本漂移检查。只黄灯,不阻塞运行;selfupdate/install 会负责刷新。
+if [ -f "$ROOT/sync_skills.sh" ]; then
+  CHECK_OUT="/tmp/broll_skill_check.$$"
+  if bash "$ROOT/sync_skills.sh" --check >"$CHECK_OUT" 2>&1; then
+    ok "broll/broll-auto skill 副本与 repo 模板一致"
+  else
+    warn "broll/broll-auto skill 副本漂移 → 运行 bash ./sync_skills.sh 刷新"
+    sed 's/^/    /' "$CHECK_OUT"
+  fi
+  rm -f "$CHECK_OUT"
+fi
+
 echo "== 自检结束 =="
 if [ "$RED" -eq 0 ]; then
   echo "[全绿] 可开工。提醒:抖音解析/出页用 \$DY_PY;pHash 去重(apply_verdicts.py)用 system python3;下载抖音封面/正片用 requests 带 Referer(curl 对字节 CDN 报 SSL)。"
