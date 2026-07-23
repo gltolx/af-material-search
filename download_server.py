@@ -11,8 +11,9 @@
 **必须用 douyin venv python 跑**(它有 requests 给抖音直下,又能 subprocess 出 yt-dlp):
   BROLL_RES=<dir> ~/.local/share/uv/tools/douyin-mcp-server/bin/python download_server.py   (run_in_background)
 """
-import os, re, sys, json, time, glob, shutil, atexit, signal, threading, subprocess, urllib.request, urllib.parse, urllib.error
+import os, re, sys, json, time, glob, shutil, atexit, signal, threading, subprocess, tempfile, hashlib, urllib.request, urllib.parse, urllib.error
 import concurrent.futures
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 RES = os.environ.get("BROLL_RES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
@@ -33,6 +34,8 @@ _cancel_lock = threading.Lock()
 _inflight = {}
 _inflight_lock = threading.Lock()
 _DLPORT_FILE = ""                            # 端口旁车文件路径(__main__ 绑定后赋值;atexit/信号处理共用清理)
+SELECTION_VERSION = 1
+_selection_lock = threading.Lock()            # selection_state.json 读写锁(快速连点/多 tab 不产半文件)
 
 
 def _find_bin(name, env, fixed):  # 版本无关定位:env→PATH→固定候选(换机 system python≠3.9 / ffmpeg 走 brew 也不坏)
@@ -87,6 +90,104 @@ def stable_id(page, url):
     m = re.search(r"[?&]v=([\w-]{6,})", s) or re.search(r"youtu\.be/([\w-]{6,})", s)  # YT
     if m: return "yt_" + m.group(1)
     return "id_" + hashlib.md5(s.encode("utf-8")).hexdigest()[:10]
+
+
+def _normalize_selection_ids(value, field):
+    if not isinstance(value, list):
+        raise ValueError(field + " must be a list")
+    if len(value) > 50000:
+        raise ValueError(field + " exceeds 50000 items")
+    out, seen = [], set()
+    for sid in value:
+        if not isinstance(sid, str) or not sid or len(sid) > 200:
+            raise ValueError(field + " entries must be strings of length 1..200")
+        if sid not in seen:
+            seen.add(sid); out.append(sid)
+    return out
+
+
+def _normalize_selection_state(raw):
+    if (not isinstance(raw, dict) or type(raw.get("version")) is not int
+            or raw.get("version") != SELECTION_VERSION):
+        raise ValueError("selection state version must be 1")
+    revision = raw.get("revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        raise ValueError("selection revision must be a non-negative integer")
+    known = _normalize_selection_ids(raw.get("known_ids"), "known_ids")
+    selected = _normalize_selection_ids(raw.get("selected_ids"), "selected_ids")
+    if not set(selected).issubset(set(known)):
+        raise ValueError("selected_ids must be a subset of known_ids")
+    return {"version": SELECTION_VERSION, "revision": revision,
+            "known_ids": known, "selected_ids": selected,
+            "updated_at": str(raw.get("updated_at") or "")}
+
+
+def _selection_path():
+    return os.path.join(RES, "selection_state.json")
+
+
+def selection_namespace():
+    """把选择状态绑定到当前结果目录，避免页面误连 8788 上的另一个选题服务。"""
+    return hashlib.sha256(os.path.abspath(RES).encode("utf-8")).hexdigest()[:16]
+
+
+class SelectionConflict(ValueError):
+    def __init__(self, current):
+        super().__init__("selection revision conflict")
+        self.current = current
+
+
+def _load_selection_state_unlocked():
+    path = _selection_path()
+    if not os.path.exists(path):
+        return {"initialized": False, "version": SELECTION_VERSION, "revision": 0,
+                "known_ids": [], "selected_ids": [], "updated_at": ""}
+    try:
+        with open(path, encoding="utf-8") as f:
+            state = _normalize_selection_state(json.load(f))
+    except Exception as exc:
+        raise ValueError("invalid selection state: " + str(exc)) from exc
+    return dict({"initialized": True}, **state)
+
+
+def load_selection_state():
+    with _selection_lock:
+        return _load_selection_state_unlocked()
+
+
+def save_selection_state(raw, base_revision=None):
+    state = _normalize_selection_state(raw)
+    if (base_revision is not None and
+            (not isinstance(base_revision, int) or isinstance(base_revision, bool) or base_revision < 0)):
+        raise ValueError("base_revision must be a non-negative integer")
+    os.makedirs(RES, exist_ok=True)
+    tmp_path = None
+    with _selection_lock:
+        current = _load_selection_state_unlocked()
+        current_revision = current["revision"]
+        same = (state["revision"] == current_revision
+                and state["known_ids"] == current["known_ids"]
+                and state["selected_ids"] == current["selected_ids"])
+        if ((base_revision is not None and base_revision != current_revision)
+                or state["revision"] < current_revision
+                or (state["revision"] == current_revision and not same)):
+            raise SelectionConflict(current)
+        if same and current["initialized"]:
+            return {k: current[k] for k in ("version", "revision", "known_ids", "selected_ids", "updated_at")}
+        state["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=RES,
+                                             prefix=".selection_state.", suffix=".tmp") as f:
+                tmp_path = f.name
+                json.dump(state, f, ensure_ascii=False, indent=1)
+                f.write("\n"); f.flush(); os.fsync(f.fileno())
+            os.replace(tmp_path, _selection_path())
+            tmp_path = None
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try: os.remove(tmp_path)
+                except OSError: pass
+    return state
 
 
 def platform_of(item):
@@ -734,11 +835,19 @@ class H(BaseHTTPRequestHandler):
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST,OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "*")
 
     def do_OPTIONS(self):
         self.send_response(200); self._cors(); self.end_headers()
+
+    def _send_json(self, status, payload):
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status); self._cors()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data))); self.end_headers()
+        try: self.wfile.write(data)
+        except Exception: pass
 
     def _pickdir(self):
         # 唤起本机原生「选择文件夹」对话框(macOS osascript),回传所选目录的 POSIX 路径(取消则空串)
@@ -780,6 +889,13 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(parsed.query)
+        if parsed.path == "/selection":
+            try:
+                state = load_selection_state()
+                state["namespace"] = selection_namespace()
+                return self._send_json(200, state)
+            except ValueError as exc:
+                return self._send_json(500, {"ok": False, "error": str(exc)[:240]})
         if parsed.path == "/ping":
             # 契约2:返回本会话 RES 选题目录名(纯文本),供出页校验"页面连的是不是自己这个 server"
             self.send_response(200); self._cors()
@@ -852,13 +968,33 @@ class H(BaseHTTPRequestHandler):
                 pass
 
     def do_POST(self):
-        n = int(self.headers.get("Content-Length", 0))
+        parsed = urllib.parse.urlparse(self.path)
         try:
+            n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n).decode("utf-8"))
         except Exception as e:
+            if parsed.path == "/selection":
+                return self._send_json(400, {"ok": False, "error": "bad json: " + str(e)[:220]})
             self.send_response(400); self._cors(); self.end_headers()
             self.wfile.write(("bad json: " + str(e)).encode()); return
-        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/selection":
+            if not isinstance(body, dict) or body.get("namespace") != selection_namespace():
+                return self._send_json(409, {"ok": False, "error": "selection namespace mismatch",
+                                             "namespace": selection_namespace()})
+            try:
+                saved = save_selection_state(body, base_revision=body.get("base_revision"))
+            except SelectionConflict as exc:
+                current = dict(exc.current)
+                current["namespace"] = selection_namespace()
+                return self._send_json(409, {"ok": False, "error": str(exc),
+                                             "namespace": selection_namespace(), "state": current})
+            except ValueError as exc:
+                return self._send_json(400, {"ok": False, "error": str(exc)[:240]})
+            except Exception as exc:
+                return self._send_json(500, {"ok": False, "error": str(exc)[:240]})
+            return self._send_json(200, {"ok": True, "namespace": selection_namespace(),
+                                         "revision": saved["revision"],
+                                         "selected": len(saved["selected_ids"])})
         if parsed.path == "/cancel_clean":
             # ③ 取消(契约5):body {"job_id":...} → 置该 job 取消 Event;handle_clean 主循环每轮开头检查到则停投递
             jid = (body.get("job_id") if isinstance(body, dict) else None) or ""

@@ -2,7 +2,7 @@
 """Stage 5/7/9:合并语义分 → 三色判决 → ID去重 → 封面本地化(下载远端封面,顺带让页面能显示)→ pHash 感知去重(折叠搬运近重复)→ 出 filtered.html。
 读 candidates.json + scores_part*.json + relevance_spec.json;出 filtered.html + verdicts.json + 本地封面 covers/。
 """
-import json, os, glob, html, re, urllib.request
+import json, os, glob, html, re, urllib.request, hashlib
 
 RES = os.environ.get("BROLL_RES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 COV = os.path.join(RES, "covers"); os.makedirs(COV, exist_ok=True)
@@ -208,12 +208,12 @@ def card(c):
     if sm:
         per = e(sm.get("persona") or "")
         mtag = '<div class="mtag">' + (('👤' + per + ' ｜ ') if per else '') + '📄' + e(sm["name"]) + '</div>'
-    return ('<div class="card' + (' undl' if undl else '') + '">'
+    return ('<div class="card' + (' undl' if undl else '') + '" data-id="' + e(sid) + '">'
             '<a class="thumb" href="' + link + '" target="_blank" rel="noopener"'
             ' data-plat="' + e(c["platform"]) + '" data-page="' + e(c.get("page") or "") + '" data-url="' + e(c.get("url") or "")
             + '" data-cover="' + cov + '">'
             + thumb + scb + f'<span class="badge plat">{e(disp_plat(c))}</span>{dup}{durb}{undlb}'
-            '<label class="chk" onclick="event.stopPropagation()"><input type="checkbox" class="sel"'
+            '<label class="chk" onclick="event.stopPropagation()"><input type="checkbox" class="sel" data-id="' + e(sid) + '"'
             ' data-plat="' + e(c["platform"]) + '" data-page="' + e(c.get("page") or "") + '" data-url="' + e(c.get("url") or "")
             + '" data-title="' + e(c.get("title") or "") + '" data-verdict="' + e(c["verdict"])
             + '" data-score="' + e(c["vscore"] if c["vscore"] is not None else "") + '"' + ds + chk + dis + '></label></a>'
@@ -233,38 +233,195 @@ CSS = ("*{box-sizing:border-box}body{margin:0;font-family:-apple-system,'PingFan
        ".card.undl{opacity:.6}.card.undl .thumb{filter:grayscale(.5)}.badge.undl{left:6px;top:30px;background:#b91c1c;color:#fff;font-size:11px;font-weight:600;max-width:88%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card.undl .chk{opacity:.5}"
        ".zsel{display:inline-flex;align-items:center;gap:6px;font-weight:400;font-size:13px;cursor:pointer;user-select:none;vertical-align:middle}.zsel input{width:16px;height:16px;cursor:pointer}.zcount{font-size:12px;color:#6b7280}"
        ".play{position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;z-index:5;object-fit:cover;opacity:0;transition:opacity .25s ease}.play.ready{opacity:1}")
+CSS += (".selected-workspace[hidden],#allWorkspace[hidden]{display:none}.selected-workspace{padding-bottom:18px}"
+        ".selection-restoring input.sel,.selection-restoring input.zall,.selection-restoring #showSelected{pointer-events:none;opacity:.55}"
+        ".selected-empty{padding:42px 16px;text-align:center;color:#6b7280;background:#fff;border:1px dashed #cbd5e1;border-radius:10px}.selected-empty[hidden]{display:none}"
+        ".card.picked{border-color:#6366f1;box-shadow:0 0 0 1px rgba(99,102,241,.2)}"
+        ".card.focus-hit{outline:3px solid #f97316;outline-offset:4px;box-shadow:0 0 0 7px rgba(249,115,22,.24),0 10px 28px rgba(0,0,0,.2);animation:selectionPulse .8s ease-out 1}"
+        "@keyframes selectionPulse{0%{transform:scale(.97)}55%{transform:scale(1.015)}100%{transform:scale(1)}}")
 psum = " | ".join(f"{p} 留{platcnt[p]['keep']}/审{platcnt[p]['review']}/弃{platcnt[p]['drop']}" for p in platcnt)
 _topic = re.sub(r'[\\/:*?"<>|·()（）【】\s]+', "", spec.get("topic", "") or "")[:24] or "未命名选题"
 _topic_disp = (spec.get("topic", "") or "").strip()[:40] or "未命名选题"  # 出页标题用的可读选题(随 spec 走,不再写死米卢/2002)
 DEFAULT_DL_DIR = "~/Downloads/af素材/" + _topic  # 下载默认落点(按选题归类);用户可在页面顶部改
 DLPORT = os.environ.get("DOWNLOAD_PORT", "8788")  # 与 download_server.py 同一端口(可 env 覆盖;出页 JS 据此连端点)
+SELECTION_NS = hashlib.sha256(os.path.abspath(RES).encode("utf-8")).hexdigest()[:16]
 JS = r"""
+document.documentElement.classList.add("selection-restoring");
 (async function(){
  /* ④ 端口运行期发现:同源读 ./.dlport(download_server 启动写真实端口),读不到/异常回落默认 __DLPORT__ */
  var BASE="http://127.0.0.1:__DLPORT__";
  try{ var pr=await fetch("./.dlport",{cache:"no-store"}); var pt=(await pr.text()).trim(); if(/^\d+$/.test(pt)) BASE="http://127.0.0.1:"+pt; }catch(_){}
- var EP=BASE+"/download", PV=BASE+"/preview";
+ var EP=BASE+"/download", PV=BASE+"/preview", SELECTION_NS="__SELECTION_NS__";
+ var SELECTION_KEY="af_selection:__SELECTION_NS__", selectionRevision=0, selectionServerRevision=0, saveEpoch=0, saveChain=Promise.resolve();
+ function fetchWithTimeout(url,options,ms){
+  if(typeof AbortController==="undefined")return fetch(url,options);
+  var controller=new AbortController(),timer=setTimeout(function(){controller.abort();},ms);
+  var opts=Object.assign({},options||{},{signal:controller.signal});
+  return fetch(url,opts).finally(function(){clearTimeout(timer);});
+ }
+ function allSels(){return Array.prototype.slice.call(document.querySelectorAll("input.sel"));}
+ /* selection-overrides:start — 409 后只重放尚未由服务端确认的逐素材人工操作 */
+ var pendingOverrides={},overrideSeq=0;
+ function recordOverride(id,checked){if(id)pendingOverrides[id]={checked:!!checked,seq:++overrideSeq};}
+ function captureOverrides(){var out={};Object.keys(pendingOverrides).forEach(function(id){var x=pendingOverrides[id];out[id]={checked:x.checked,seq:x.seq};});return out;}
+ function replayOverrides(){allSels().forEach(function(c){var x=pendingOverrides[c.dataset.id];if(x)c.checked=x.checked;});}
+ function clearConfirmed(sent){Object.keys(sent).forEach(function(id){var current=pendingOverrides[id];if(current&&current.seq===sent[id].seq)delete pendingOverrides[id];});}
+ function recordStateDiff(base,desired){
+  var before={},after={},desiredKnown={};base.selected_ids.forEach(function(id){before[id]=1;});desired.selected_ids.forEach(function(id){after[id]=1;});desired.known_ids.forEach(function(id){desiredKnown[id]=1;});
+  allSels().forEach(function(c){var id=c.dataset.id;if(desiredKnown[id]&&!!before[id]!==!!after[id])recordOverride(id,!!after[id]);});
+ }
+ /* selection-overrides:end */
+ function normalizeState(raw){
+  if(!raw||raw.namespace!==SELECTION_NS||raw.version!==1||!Number.isInteger(raw.revision)||raw.revision<0||!Array.isArray(raw.known_ids)||!Array.isArray(raw.selected_ids))return null;
+  var known=[],ks={},selected=[],ss={};
+  for(var i=0;i<raw.known_ids.length;i++){var id=raw.known_ids[i];if(typeof id!=="string"||!id||id.length>200)return null;if(!ks[id]){ks[id]=1;known.push(id);}}
+  for(var j=0;j<raw.selected_ids.length;j++){var sid=raw.selected_ids[j];if(typeof sid!=="string"||!ks[sid])return null;if(!ss[sid]){ss[sid]=1;selected.push(sid);}}
+  return {namespace:SELECTION_NS,version:1,revision:raw.revision,known_ids:known,selected_ids:selected,updated_at:raw.updated_at||""};
+ }
+ function applyState(state){
+  var known={},selected={}; state.known_ids.forEach(function(id){known[id]=1;}); state.selected_ids.forEach(function(id){selected[id]=1;});
+  allSels().forEach(function(c){if(known[c.dataset.id])c.checked=!!selected[c.dataset.id];}); selectionRevision=state.revision;
+ }
+ function snapshot(bump){
+  if(bump)selectionRevision++;
+  var known=[],selected=[],seen={},picked={};
+  allSels().forEach(function(c){var id=c.dataset.id;if(!id)return;if(!seen[id]){seen[id]=1;known.push(id);}if(c.checked)picked[id]=1;});
+  known.forEach(function(id){if(picked[id])selected.push(id);});
+  return {namespace:SELECTION_NS,version:1,revision:selectionRevision,known_ids:known,selected_ids:selected,updated_at:new Date().toISOString()};
+ }
+ function readLocal(){try{return normalizeState(JSON.parse(localStorage.getItem(SELECTION_KEY)||"null"));}catch(_){return null;}}
+ function writeLocal(state){try{localStorage.setItem(SELECTION_KEY,JSON.stringify(state));}catch(_){}}
+ function enqueueState(state){
+  var epoch=saveEpoch,sentOverrides=captureOverrides();
+  saveChain=saveChain.catch(function(){}).then(async function(){
+   if(epoch!==saveEpoch)return;
+   var payload=Object.assign({},state,{base_revision:selectionServerRevision});
+   var resp=await fetchWithTimeout(BASE+"/selection",{method:"POST",headers:{"Content-Type":"text/plain"},body:JSON.stringify(payload)},1800);
+   var data=null;try{data=await resp.json();}catch(_){}
+   if(resp.status===409&&data&&data.state){
+    var latest=normalizeState(data.state);if(!latest)throw new Error("选择状态冲突响应无效");
+    saveEpoch++;selectionServerRevision=latest.revision;applyState(latest);replayOverrides();
+    var currentIds={};allSels().forEach(function(c){currentIds[c.dataset.id]=1;});
+    var serverKnown={};latest.known_ids.forEach(function(id){serverKnown[id]=1;});
+    var hasNew=allSels().some(function(c){return !serverKnown[c.dataset.id];});
+    var hasRemoved=latest.known_ids.some(function(id){return !currentIds[id];});
+    var needsRetry=Object.keys(pendingOverrides).length>0||hasNew||hasRemoved;
+    var reconciled=snapshot(needsRetry);writeLocal(reconciled);refresh();
+    var el=document.getElementById("dllog");if(el)el.textContent="⚠ 另一个页面已更新选择，已载入最新状态";
+    if(needsRetry)setTimeout(function(){enqueueState(reconciled);},0);
+    return;
+   }
+   if(!resp.ok){
+    if(resp.status===409)throw new Error("当前下载服务属于另一个选题，未写入选择状态");
+    throw new Error("HTTP "+resp.status);
+   }
+   if(!data||data.namespace!==SELECTION_NS||!Number.isInteger(data.revision))throw new Error("选择状态保存响应无效");
+   selectionServerRevision=data.revision;clearConfirmed(sentOverrides);
+  }).catch(function(err){var el=document.getElementById("dllog");if(el)el.textContent=String(err&&err.message||err).indexOf("另一个选题")>=0?"⚠ 当前下载服务属于另一个选题，选择仅保存在浏览器":"⚠ 选择已保存在浏览器，下载服务恢复后会继续同步";console.warn("selection save failed",err);});
+  return saveChain;
+ }
+ function queueSave(bump){var state=snapshot(bump);writeLocal(state);return enqueueState(state);}
+ async function restoreSelection(){
+  var local=readLocal(),server=null,serverInitialized=false,serverReadOk=false;
+  var initialPageState=snapshot(false);
+  try{
+   var resp=await fetchWithTimeout(BASE+"/selection",{cache:"no-store"},1800);
+   if(!resp.ok)throw new Error("HTTP "+resp.status);
+   var raw=await resp.json();if(raw.namespace!==SELECTION_NS)throw new Error("selection namespace mismatch");
+   serverInitialized=!!raw.initialized;selectionServerRevision=raw.revision;if(serverInitialized)server=normalizeState(raw);
+   if(serverInitialized&&!server)throw new Error("invalid server selection state");
+   serverReadOk=true;
+  }catch(err){var warn=document.getElementById("dllog");if(warn)warn.textContent="⚠ 选择状态服务暂不可读，当前使用浏览器备份";console.warn("selection restore failed",err);}
+  var chosen=null;
+  if(local&&server)chosen=local.revision>server.revision?local:server;else chosen=local||server;
+  if(chosen===local&&local)recordStateDiff(server||initialPageState,local);
+  if(chosen)applyState(chosen);
+  var oldKnown={};if(chosen)chosen.known_ids.forEach(function(id){oldKnown[id]=1;});
+  var currentIds={};allSels().forEach(function(c){currentIds[c.dataset.id]=1;});
+  var hasNew=allSels().some(function(c){return !oldKnown[c.dataset.id];});
+  var hasRemoved=!!chosen&&chosen.known_ids.some(function(id){return !currentIds[id];});
+  var state=snapshot(!chosen||hasNew||hasRemoved);writeLocal(state);
+  if(serverReadOk&&(!serverInitialized||!server||(local&&server&&local.revision>server.revision)||hasNew||hasRemoved))enqueueState(state);
+ }
+ var allCards=Array.prototype.slice.call(document.querySelectorAll(".card"));
+ var selectionHomes=new Map(),selectedMode=false,focusedCard=null;
+ var allWorkspace=document.getElementById("allWorkspace"),selectedWorkspace=document.getElementById("selectedWorkspace");
+ var selectedGrid=document.getElementById("selectedGrid"),selectedEmpty=document.getElementById("selectedEmpty");
+ var showSelected=document.getElementById("showSelected"),selectedTotal=document.getElementById("selectedTotal");
+ allCards.forEach(function(card){var marker=document.createComment("selection-home");card.parentNode.insertBefore(marker,card);selectionHomes.set(card,marker);});
+ function restoreCard(card){var marker=selectionHomes.get(card);if(marker&&marker.parentNode)marker.parentNode.insertBefore(card,marker.nextSibling);}
+ function clearFocused(){if(focusedCard)focusedCard.classList.remove("focus-hit");focusedCard=null;}
+ function syncSelectedWorkspace(){
+  if(!selectedMode)return;
+  allCards.forEach(function(card){var c=card.querySelector("input.sel");if(c&&c.checked&&!c.disabled)selectedGrid.appendChild(card);else restoreCard(card);});
+  if(focusedCard&&focusedCard.parentNode!==selectedGrid)clearFocused();
+ }
+ function setSelectedMode(on){
+  stopPlay();clearFocused();selectedMode=!!on;
+  if(selectedMode){allWorkspace.hidden=true;selectedWorkspace.hidden=false;syncSelectedWorkspace();}
+  else{allCards.forEach(restoreCard);selectedWorkspace.hidden=true;allWorkspace.hidden=false;}
+  refresh();
+ }
+ function selectedCardsInView(){
+  var source=selectedMode?Array.prototype.slice.call(selectedGrid.querySelectorAll(".card")):allCards;
+  return source.filter(function(card){var c=card.querySelector("input.sel");return c&&c.checked&&!c.disabled;});
+ }
+ function cardLocatorTop(card){
+  var d=card.closest("details"),closed=null;
+  while(d){if(!d.open)closed=d;d=d.parentElement?d.parentElement.closest("details"):null;}
+  var node=closed?(closed.querySelector("summary")||closed):card;
+  return node.getBoundingClientRect().top;
+ }
+ function openCardDetails(card){
+  var d=card.closest("details");
+  while(d){d.open=true;d=d.parentElement?d.parentElement.closest("details"):null;}
+ }
+ function focusNextSelected(){
+  var cards=selectedCardsInView(),log=document.getElementById("dllog");
+  if(!cards.length){clearFocused();if(log)log.textContent="当前没有已选素材";return;}
+  var idx=focusedCard?cards.indexOf(focusedCard):-1,target;
+  if(idx>=0)target=cards[(idx+1)%cards.length];
+  else{
+   var header=document.querySelector("header"),edge=header?header.getBoundingClientRect().bottom:0;
+   target=cards.find(function(card){return cardLocatorTop(card)>=edge-2;})||cards[0];
+  }
+  clearFocused();focusedCard=target;openCardDetails(target);target.classList.add("focus-hit");
+  var pos=cards.indexOf(target)+1;if(log)log.textContent="已选 "+pos+" / "+cards.length+"（F1 下一条）";
+  requestAnimationFrame(function(){target.scrollIntoView({behavior:"smooth",block:"center"});});
+ }
+ showSelected.addEventListener("click",function(){setSelectedMode(!selectedMode);});
+ document.addEventListener("keydown",function(e){if(e.key==="F1"&&!e.altKey&&!e.ctrlKey&&!e.metaKey&&!e.shiftKey){e.preventDefault();focusNextSelected();}});
  /* ⑥ 仅统计/操作可下(未 disabled)的 checkbox */
  function sels(z){return Array.prototype.slice.call(document.querySelectorAll('.grid[data-zone="'+z+'"] input.sel')).filter(function(c){return !c.disabled;});}
  function refresh(){
-  var tot=0;["keep","review","drop"].forEach(function(z){
+  ["keep","review","drop","filler","filler-drop"].forEach(function(z){
    var arr=sels(z), n=arr.filter(function(c){return c.checked;}).length;
-   var el=document.getElementById("cnt-"+z); if(el)el.textContent="已选 "+n; tot+=n;
+   var el=document.getElementById("cnt-"+z); if(el)el.textContent="已选 "+n;
    var za=document.querySelector('.zall[data-zone="'+z+'"]');
    if(za){ za.checked=n>0&&n===arr.length; za.indeterminate=n>0&&n<arr.length; }
   });
+  var checked=allSels().filter(function(c){return c.checked&&!c.disabled;}),tot=checked.length;
+  allCards.forEach(function(card){var c=card.querySelector("input.sel");card.classList.toggle("picked",!!(c&&c.checked&&!c.disabled));});
+  if(selectedMode)syncSelectedWorkspace();
+  showSelected.textContent=(selectedMode?"返回全部素材（":"展示已选（")+tot+"）";
+  selectedTotal.textContent=tot;selectedEmpty.hidden=tot>0;
   var b=document.getElementById("dlSel"); if(b){b.textContent="⬇ 下载选中 ("+tot+")"; b.disabled=tot===0;}
   var cb=document.getElementById("clnSel"); if(cb){cb.textContent="🧹 批量清洗选中 ("+tot+")"; cb.disabled=tot===0;}
  }
- document.addEventListener("change",function(e){
+ function handleSelectionChange(e){
   var t=e.target;
   if(t.classList&&t.classList.contains("zall")){
    var z=t.getAttribute("data-zone"), arr=sels(z);
    var allOn=arr.length>0&&arr.every(function(c){return c.checked;});
-   var on=!allOn; arr.forEach(function(c){c.checked=on;}); refresh(); return;   /* 三态:原本全选才取消,空/部分都→全选 */
+   var on=!allOn; arr.forEach(function(c){c.checked=on;recordOverride(c.dataset.id,on);}); refresh(); queueSave(true); return;   /* 三态:原本全选才取消,空/部分都→全选 */
   }
-  if(t.classList&&t.classList.contains("sel"))refresh();
- });
+  if(t.classList&&t.classList.contains("sel")){
+   allSels().forEach(function(c){if(c!==t&&c.dataset.id===t.dataset.id)c.checked=t.checked;});
+   recordOverride(t.dataset.id,t.checked);
+   if(focusedCard===t.closest(".card")&&!t.checked)clearFocused();
+   refresh(); queueSave(true);
+  }
+ }
  /* 悬浮自动播放:全局单例 + 300ms 防抖 + 事件委托(329 卡不逐个绑,移开即停) */
  var playing=null, hoverTimer=null;
  function stopPlay(){ if(playing){ var p=playing.querySelector(".play"); if(p){ try{p.pause&&p.pause();}catch(_){}; p.remove(); } playing=null; } }
@@ -380,6 +537,8 @@ JS = r"""
   },{rootMargin:"400px"});
   Array.prototype.slice.call(document.querySelectorAll('.thumb')).forEach(function(t){io.observe(t);});
  }
+ try{await restoreSelection();}finally{document.documentElement.classList.remove("selection-restoring");}
+ document.addEventListener("change",handleSelectionChange);
  refresh();
 })();
 """
@@ -398,17 +557,21 @@ def _undl_summary():
         parts.append(f"{_p} {_n} 条" + (f":{main[:20]}" if main else "") + tip)
     return f"⚠ {len(UNDL)} 条预检无法下载(仍可勾选,真实可下性以实测为准):" + " · ".join(parts)
 _dllog_init = e(_undl_summary())
-JS = JS.replace("__DLPORT__", DLPORT).replace("__DEFAULT_DL_DIR__", DEFAULT_DL_DIR.replace("\\", "\\\\").replace('"', '\\"'))  # 仅回落默认端口/默认目录;运行期优先 fetch('./.dlport') 拿真实端口(多开各起各端口)
+JS = (JS.replace("__DLPORT__", DLPORT)
+        .replace("__DEFAULT_DL_DIR__", DEFAULT_DL_DIR.replace("\\", "\\\\").replace('"', '\\"'))
+        .replace("__SELECTION_NS__", SELECTION_NS))
 doc = ('<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + e("素材关联度筛选 · " + _topic_disp) + '</title><style>' + CSS + '</style></head><body>'
        f'<header><div class="hleft"><h1>素材关联度语义筛选 · {e(_topic_disp)}</h1><div class="note">共{len(reps)}条 · 🟢留{len(keep)}/🟡审{len(review)}/⚪弃{len(drop)} · {e(psum)}</div>'
        + (f'<div class="note" style="color:#b45309">⚠ 欠匹配(&lt;2条,建议补搜):{e("、".join(UNDERMATCHED))}</div>' if UNDERMATCHED else '')
        + '</div>'
-       '<div class="hright"><button id="dlSel" class="dlbtn" disabled>⬇ 下载选中 (0)</button>'
+       '<div class="hright"><button id="showSelected" class="dlbtn2">展示已选（0）</button>'
+       '<button id="dlSel" class="dlbtn" disabled>⬇ 下载选中 (0)</button>'
        '<button id="clnSel" class="dlbtn" disabled>🧹 批量清洗选中 (0)</button>'
        f'<span id="dllog" class="dllog">{_dllog_init}</span></div></header>'
-       f'<main><h2>🟢 KEEP {len(keep)} {zsel("keep")}</h2><div class="grid" data-zone="keep">{_zk}</div>'
+       f'<main><section id="selectedWorkspace" class="selected-workspace" hidden><h2>✓ 已选素材 <span id="selectedTotal">0</span></h2><div id="selectedEmpty" class="selected-empty">当前没有已选素材</div><div id="selectedGrid" class="grid"></div></section>'
+       f'<div id="allWorkspace"><h2>🟢 KEEP {len(keep)} {zsel("keep")}</h2><div class="grid" data-zone="keep">{_zk}</div>'
        f'<details open><summary>🟡 REVIEW {len(review)} {zsel("review")}</summary><div class="grid" data-zone="review">{_zr}</div></details>'
-       f'<details><summary>⚪ DROP {len(drop)}(可展开查误杀) {zsel("drop")}</summary><div class="grid" data-zone="drop">{_zd}</div></details></main>'
+       f'<details><summary>⚪ DROP {len(drop)}(可展开查误杀) {zsel("drop")}</summary><div class="grid" data-zone="drop">{_zd}</div></details></div></main>'
        '<script>' + JS + '</script></body></html>')
 open(os.path.join(RES, "filtered.html"), "w", encoding="utf-8").write(doc)
 print(f"原{len(cands)} → ID去重 -{id_dups} → 封面pHash去重 -{ph_dups} → 剩 {len(reps)}")
