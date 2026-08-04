@@ -12,3 +12,6 @@ __pycache__/
 
 # 安装时生成的契约软链(由 install.sh 现建,不入仓)
 /AGENTS.md
+
+# Codex isolated feature worktrees
+.worktrees/
