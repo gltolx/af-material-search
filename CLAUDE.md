@@ -23,14 +23,15 @@
 - 网络:Bash 出口在韩国,但浏览器走国内节点 → 抖音/小红书/B站可用。
 
 ## 数据契约(脚本间靠它对接,别改字段名)
-- `results/scored.json`:候选 `[{platform,title,url,page,cover,duration}]`(四平台收割产物;`duration`=整数秒,B站/YT/抖音收割时自带,小红书靠 yt-dlp 补;旧数据用 `backfill_duration.py` 回填)
+- `results/scored.json`:候选 `[{platform,title,url,page,cover,duration,src_pool}]`(四平台收割产物;`duration`=整数秒,B站/YT/抖音收割时自带,小红书靠 yt-dlp 补;旧数据用 `backfill_duration.py` 回填。**`src_pool∈{theme,filler}`**=该条来自主题收割还是中性垫片收割,merge_scored 据收割文件名标,缺省 theme;同视频跨池 theme 优先)
 - `results/xhs_imgs.json`:小红书 `{note_id:{t(type:normal/video),imgs:[原图URL]}}`(merge_scored.py 从 xhs_raw.json **自动产**,backfill_xhs_token.py 也产;download_server 据 `t` 决定图文下图片/视频走 yt-dlp。**缺它则图文笔记被 yt-dlp 下成幻灯片 mp4**)
-- `results/prefilter.json`:`{kill, need_enrich, need_llm}`(score_candidates.py 产)
+- `results/prefilter.json`:`{kill, need_enrich, need_llm, need_llm_filler}`(score_candidates.py 产;`need_llm_filler`=中性垫片池待判桶,与主题 need_llm 分开)
 - `results/scores_part*.json`:语义分 `[{idx,score,scene,era,reason,need_cover,person_primary,need_frames,eye_contact}]`(AI 亲自判;`person_primary∈{none,partial,dominant}`=R1 人物主体,`need_frames`=封面看不准需抽帧确认,`eye_contact`=正面半身/全身人脸且眼神盯镜头→R1b 由 apply_verdicts 硬丢)
 - `results/scripts.json`:解析后的稿件 `[{script_id,persona,name,text,words}]`(接稿时 AI 产;persona 可空,name 缺则总结一个短标题)
 - `results/script_matches.json`:逐稿匹配表 `{script_id:{persona,name,words,matched:[{idx,stable_id,reason,score}]}}`(判决后 AI 产;**独占·最佳匹配**;**配额按口播稿总数 N 分档**:N≥10→2~5/稿(常态)、5≤N≤9→4~6/稿、N<5→5~7/稿(少稿多配),同档内长稿取偏上限;apply_verdicts 吃它做自动勾选 + 人设/稿名标签 + 欠匹配提示)
+- **中性垫片池(filler)增量平行轨**(用户要"干净中性空镜垫片"时启用;**绝不影响主题池七项**,代码物理隔离 + 冒烟测试证明主题 verdicts 字节一致):`relevance_spec.json.filler{enable,queries.douyin/.xhs,concepts:[{name,from_script,src_sentence}],negative_terms,max_dur_sec(默认25),ideal_dur_sec,per_script_cap(默认6),allow_images,plat_thresholds}`(AI 逐稿读稿派生·可追溯·只投抖音+小红书·不建固定通用词库)→ filler 单独收割落 `harvest_{douyin,xhs}_filler.json` → `results/scores_filler_part*.json`(AI 按**标题+封面**判中性场景匹配度,同 scores_part schema)→ `results/filler_matches.json`(`{script_id:{name,persona,matched:[{idx,src_sentence}]}}`,每稿≤per_script_cap,**idx 与主题 script_matches 互斥**,0条报缺不补)→ `results/verdicts_filler.json`(apply_verdicts 产,按时长升序、跳pHash、独立去重)。出页「🎞 中性垫片池」区自动勾选;入库搭**该稿自己的库**+`pool=filler` 标记(autorun_kb 零改动)。详见 SKILL.md「中性垫片池」节。
 - `results/filtered.html` + `verdicts.json` + `selection_state.json`:三色判决 + 去重(apply_verdicts.py 产)。页面:卡片底中**时长角标**、右下重复角标;header **右上**=「展示已选」连续聚合网格+下载/清洗按钮;每区标题旁**一个三态全选框**(全选✓/部分=横线/空);人工勾选/取消按 stable_id **跨刷新与重开持久保存**(`selection_state.json`,localStorage 备用);**F1** 从当前视口定位下一条已选并循环;**悬浮卡片自动播放**(B站/YT 官方 iframe、小红书走 `/preview` 代理、抖音静态封面);勾选框带 `data-id/plat/page/url/title/verdict/score`
-- `~/Downloads/af素材/<选题>/<口播稿名>_<平台>_<标题>_<id>.mp4` + 同目录 `_manifest.jsonl`:选片后下载产物 + 清单(download_server.py 产;**匹配到稿的带口播稿名前缀,未匹配的退回 `<平台>_<标题>_<id>`**;默认下到系统下载目录·按选题归类,页面顶部路径框可改,下完自动开 Finder)。**`_manifest.jsonl` = 入库知识库对接口**,每行 `{ts,platform,stable_id,title,page,url,verdict,score,script_name,persona,status,file,bytes,error,warn}`(file=文件名;`warn`=如小红书无类型映射时的告警)
+- `~/Downloads/af素材/<选题>/<口播稿名>_<平台>_<标题>_<id>.mp4` + 同目录 `_manifest.jsonl`:选片后下载产物 + 清单(download_server.py 产;**匹配到稿的带口播稿名前缀,未匹配的退回 `<平台>_<标题>_<id>`**;默认下到系统下载目录·按选题归类,页面顶部路径框可改,下完自动开 Finder)。**`_manifest.jsonl` = 入库知识库对接口**,每行 `{ts,platform,stable_id,title,page,url,verdict,score,script_name,persona,pool,from_script,status,file,bytes,error,warn}`(file=文件名;`warn`=如小红书无类型映射时的告警;`pool∈{theme,filler}`+`from_script`=中性垫片可追溯/RAG 隔离用,缺省 theme)
 - 顺序:解析稿→scripts.json → 收割→scored.json → score_candidates.py(预过滤,含 R2 超时 kill)→ AI 判 need_llm(含 R1 person_primary)→ apply_verdicts.py(R1降分+R2超时弃+判决+去重+封面+出页)→ AI 逐稿匹配→script_matches.json → 重跑 apply_verdicts.py(吃 matches 自动勾选+人设/稿名标签)→ 选片(已自动勾好)→ download_server.py(稿名前缀分流下载+manifest)→(后续)读 manifest 入库
 
 ## 细节去哪看(单一事实源,别复制到这里)
@@ -38,3 +39,7 @@
 - `SCORING.md` — 关联度打分规则(标题为主+封面辅,三色阈值,扩词闭环)
 - `ARCHITECTURE.md` §13 平台分工 / §14 查询姿势(描述≠召回,带年代/意图锚点)
 - 记忆库(自动召回):跨会话软经验([[prefers-light-over-heavy]] / [[af-material-search-toolchain]] / [[search-query-posture]] / [[af-material-search-context]])
+
+## Imported historical project instructions
+
+素材搜索爬取

@@ -8,7 +8,7 @@
 > - **端口怎么带入收割 JS**:writer_server 端口已写在 `BROLL_RES/.writerport`。收割前先 Read 该文件拿到端口号 `<WPORT>`(读不到则回落 8799),把下面 `fetch` 里的 `:<WPORT>` 替换成实际端口;或在你的会话里把 `WRITER_PORT` 显式 export 后用同一值。**别再硬编码 8799**——多会话各起各端口,写错端口会落到别人会话的 writer 上(又一处串数据)。
 
 ## 抖音(DOM-scrape,取代方向键+iesdouyin)
-**节奏 ≥8s/词**(避"点两个相同形状物体"图 captcha,撞墙喊用户过码)。每词:`navigate douyin.com/search/KW?type=video` → 等 render(~5s)→ 下面 scrape。**多会话隔离:把下面所有 `dyAll_<SID>` 的 `<SID>` 替换成本会话 SID**(首词前先 `localStorage.setItem('dyAll_<SID>','[]')`,**只清自己的键,绝不动别的会话**):
+**节奏:每词 `random.uniform(8,12)` 秒随机停**(避"点两个相同形状物体"图 captcha;**绝不固定 6/8——固定心跳=机器味=撞码**;下限 8=硬地板,有并发会话再加码;撞墙喊用户过码后继续搜完该平台的词)。每词:`navigate douyin.com/search/KW?type=video` → 那个 wait **就是**词间真实间隔(设 8~12 随机,一并覆盖 ~5s 渲染)→ 下面 scrape。**多会话隔离:把下面所有 `dyAll_<SID>` 的 `<SID>` 替换成本会话 SID**(首词前先 `localStorage.setItem('dyAll_<SID>','[]')`,**只清自己的键,绝不动别的会话**):
 ```js
 (function(){let dot=s=>s.split('').join('.');let cur=JSON.parse(localStorage.getItem('dyAll_<SID>')||'[]');let seen=new Set(cur.map(x=>x.sid));
 let cards=document.querySelectorAll('.search-result-card');let list=cards.length?cards:document.querySelectorAll('a[href*="/video/"]');

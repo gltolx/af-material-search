@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """broll-auto 阶段二编排:批量清洗 → 等清洗完 → 自动入库知识库。无人值守 full-auto,绝不挂死。
 
-链路(全程不停;只在"库名0/多匹配""建任务失败"这种干净 abort 处退出,带具名理由):
-  0. **先**校验库名(fail-fast,0 成本):GET {node2}/api/kb/resolve?email=<acct> → 库名精确匹配 name→kb_id。
-     0 个或 >1 个同名 → 立即 abort(不猜库),不浪费后面算力。
-  1. 载入选中集(默认 RES/autorun_selected.json,= AI 选片+内容审查后只留 audit=pass 的项)。
-     跨 run 去重:读 RES/_autorun_manifest.jsonl,(kb_id,stable_id) 已 uploaded 的跳过(不再重清洗/重入库)。
+**按口播稿链接分库(2026-06-17)**:选中集每条可带 source_link/account/kb_name(build_autorun_selected 从
+kb_routing.json 盖章)。一个 source_link = 一套 账号+知识库 = 一个清洗任务,串行逐链接跑(每链接复用整条
+清洗+入库闭包)。不带路由字段的项 → 落兜底组,用 --account/--kb 老单库行为(向后兼容)。搜索仍是合并一趟,
+分库只在本编排层发生。
+
+链路(全程不停;只在"全部链接库名都失败""建任务失败"这种干净 abort 处退出,带具名理由):
+  1. 载入选中集(默认 RES/autorun_selected.json,= AI 选片+内容审查后只留 audit=pass 的项),按 source_link 分组。
+  2. 逐链接校验 账号+库名(fail-fast):GET {node2}/api/kb/resolve?email=<acct> 精确匹配 name→kb_id。
+     某链接 0/多匹配或缺账号库名 → **只跳过该链接**(记日志+汇总),其余照入;全部链接都失败才整批 abort。
+  3. 每链接内:跨 run 去重(读 RES/_autorun_manifest.jsonl,该 kb_id 下 (kb_id,stable_id) 已 uploaded 跳过)。
   2. 触发清洗:复用本机 download_server 的 /clean(读 RES/.dlport 拿真实端口)→ POST {items,dir} →
      读 NDJSON 流:首行 event==error → 整批 abort;event==start → 拿 job_id(整批一个);边下边清。
   3. 交织轮询·边洗边传:每 tick 拉 {node2}/api/jobs/<job_id>——发现新 status=="done" 的 **key** 即刻
@@ -19,7 +24,8 @@
 
 **必须用 douyin venv python 跑**(它有 requests):
   MATCLEAN_CLEAN_URL=https://tool.alphafin.world ~/.local/share/uv/tools/douyin-mcp-server/bin/python \
-    autorun_kb.py --account <email> --kb <知识库名> [--res results] [--items results/autorun_selected.json]
+    autorun_kb.py [--account <兜底email>] [--kb <兜底库名>] [--res results] [--items results/autorun_selected.json]
+  多链接分库:选中集已带 per-link account/kb_name(kb_routing.json 盖章),--account/--kb 仅作未路由项的兜底,可省。
 """
 import os, re, sys, json, time, argparse, hashlib
 import urllib.parse
@@ -39,6 +45,8 @@ KB_STALL_S = 12 * 60                                     # kb 在途快照连续
 KB_FAIL_MAX = int(os.environ.get("AUTORUN_KB_FAIL_MAX", "5"))  # kb-upload 连续失败达此 → 熔断停发只继续洗
 _TERMINAL = ("done", "failed", "cancelled")             # node2 文件终态(app.py:85)
 _KB_TERMINAL = ("uploaded", "failed")                   # kb_status 终态(app.py:190/197)
+FAIL_TOL = int(os.environ.get("AUTORUN_FAIL_TOLERANCE", "3"))   # 允许 ≤N 条最终失败(用户拍板 2026-06-17:3)
+MAX_ROUNDS = int(os.environ.get("AUTORUN_MAX_ROUNDS", "4"))     # 重试轮次封顶,防顽固失败死循环
 
 
 def log(msg):
@@ -297,14 +305,110 @@ def _retryable(r):
     return r.get("cstat") != "done" or r.get("kstat") == "failed"
 
 
+def run_one_link(g, outdir, res, manifest_path):
+    """跑一个口播稿链接(= 一套 账号+知识库 = 一个清洗任务)的完整 清洗+入库:
+    跨run去重 → 自动重试轮次(边洗边传)→ 写本链接台账。返回汇总 dict。
+    g = {account, kb_name, kb_id, source_link, items:[...]}。串行调用(用户拍板 2026-06-17:不并发)。"""
+    account = g["account"]; kb_id = g["kb_id"]; kb_name = g["kb_name"]; slink = g.get("source_link") or ""
+    items = g["items"]
+    tag = ("链接 %s → 库「%s」" % (slink, kb_name)) if slink else ("兜底库「%s」" % kb_name)
+    log("──── %s(账号 %s · %d 条)────" % (tag, account, len(items)))
+
+    # 跨 run 去重:本链接 kb_id 下已 uploaded 的 stable_id 跳过(键不变,天然按库隔离)
+    already = load_manifest_uploaded(manifest_path, kb_id)
+    fresh = [it for it in items if it["_sid"] not in already]
+    skipped_dup = len(items) - len(fresh)
+    log("  选中 %d 条;跨run去重跳过 %d 条(已入库);本次清洗 %d 条" % (len(items), skipped_dup, len(fresh)))
+    summary = {"tag": tag, "kb_name": kb_name, "source_link": slink, "account": account,
+               "n_up": 0, "n_fail": 0, "n_clean_fail": 0, "skipped_dup": skipped_dup,
+               "rnd": 0, "last_job": None}
+    if not fresh:
+        log("  ✅ 无新素材需入库(全部已入库)")
+        return summary
+    if len(fresh) >= 30:
+        log("  ⚠️ 大批量 %d 条:占用共享 node2 GPU 较久,继续(无人值守不阻塞)" % len(fresh))
+
+    agg = {}            # _sid -> {cstat,kstat,key,job_id,err}(后轮覆盖前轮)
+    last_job = None
+    pending = list(fresh)
+    prev_retryable = None
+    rnd = 0
+    while rnd < MAX_ROUNDS:
+        rnd += 1
+        log(("  清洗轮次 1" if rnd == 1 else "  🔁 自动重试 第 %d 轮" % rnd) + "/%d:本轮 %d 条" % (MAX_ROUNDS, len(pending)))
+        round_res, last_job = _clean_round(pending, kb_id, account, outdir, res)
+        if last_job is None:
+            log("  ⚠️ 本轮清洗触发失败,停止重试"); break
+        agg.update(round_res)
+        not_up = [it for it in fresh if agg.get(it["_sid"], {}).get("kstat") != "uploaded"]
+        retryable = [it for it in not_up if _retryable(agg.get(it["_sid"], {}))]
+        log("  第 %d 轮后:未入库 %d 条(其中可安全重试 %d)" % (rnd, len(not_up), len(retryable)))
+        if len(not_up) <= FAIL_TOL:
+            log("  ✅ 全部入库" if not not_up else "  剩 %d 条失败 ≤ 容忍阈值 %d,可接受,停止重试" % (len(not_up), FAIL_TOL)); break
+        if not retryable:
+            log("  ⚠️ 剩 %d 条无法安全重试(kb 在途/超时,重投恐重复入库),停止" % len(not_up)); break
+        if prev_retryable is not None and len(retryable) >= prev_retryable:
+            log("  ⚠️ 本轮无改善(可重试 %d→%d),判顽固失败,停止重试" % (prev_retryable, len(retryable))); break
+        prev_retryable = len(retryable)
+        pending = retryable
+    else:
+        log("  ⚠️ 达重试轮次上限 %d,停止" % MAX_ROUNDS)
+
+    # 写本链接台账(每条 fresh 取最终聚合状态;新增 kb_name/account/source_link 留痕,旧字段不动)
+    n_up = n_fail = n_clean_fail = 0
+    ts = int(time.time())
+    with open(manifest_path, "a", encoding="utf-8") as mf:
+        for it in fresh:
+            sid = it["_sid"]
+            r = agg.get(sid, {})
+            key = r.get("key"); cstat = r.get("cstat") or "orphan"; kstat = r.get("kstat")
+            if cstat != "done":
+                n_clean_fail += 1
+            if kstat == "uploaded":
+                n_up += 1
+            elif kstat and kstat != "uploaded":
+                n_fail += 1
+            mf.write(json.dumps({
+                "ts": ts, "kb_id": kb_id, "kb_name": kb_name, "account": account,
+                "source_link": slink, "platform": it.get("platform", ""),
+                "script_name": it.get("script_name", ""), "stable_id": sid,
+                "key": key, "clean_status": cstat,
+                "kb_status": kstat or ("not_done" if cstat != "done" else "n/a"),
+                "audit": it.get("audit", "pass"), "title": (it.get("title") or "")[:80],
+                "err": r.get("err", ""),
+            }, ensure_ascii=False) + "\n")
+    summary.update({"n_up": n_up, "n_fail": n_fail, "n_clean_fail": n_clean_fail, "rnd": rnd, "last_job": last_job})
+    log("  本链接:入库 %d  失败/超时 %d  清洗未成功 %d  轮次 %d" % (n_up, n_fail, n_clean_fail, rnd))
+    return summary
+
+
+def group_by_link(selected, default_account, default_kb):
+    """把选中集按"口播稿链接"分组:一个链接(source_link)= 一套 账号+知识库 = 一个清洗任务。
+    带 source_link+kb_name 的项 → 各自成组;不带的 → 落兜底组(用 --account/--kb,向后兼容老单库)。
+    返回 OrderedDict {group_key: {account, kb_name, source_link, items}}(保持首现顺序)。"""
+    groups = {}
+    for it in selected:
+        link = (it.get("source_link") or "").strip()
+        kbn = (it.get("kb_name") or "").strip()
+        acct = (it.get("account") or "").strip()
+        if link and kbn:                                    # 已路由项 → 按链接独立成组
+            g = groups.setdefault(link, {"account": acct or default_account, "kb_name": kbn,
+                                         "source_link": link, "items": []})
+        else:                                               # 未路由 → 兜底组(老单库行为)
+            g = groups.setdefault("__default__", {"account": default_account, "kb_name": default_kb,
+                                                  "source_link": "", "items": []})
+        g["items"].append(it)
+    return groups
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--account", required=True, help="入库账号 email")
-    ap.add_argument("--kb", required=True, help="知识库名称(精确匹配,重名拒绝)")
+    ap.add_argument("--account", default=None, help="兜底入库账号 email(未按链接路由的项用它;多链接时账号由选中集 per-link 字段给)")
+    ap.add_argument("--kb", default=None, help="兜底知识库名(未按链接路由的项用它;精确匹配,重名拒绝)")
     ap.add_argument("--res", default=os.environ.get("BROLL_RES", "results"), help="BROLL_RES 目录")
     ap.add_argument("--items", default=None, help="选中集 json(默认 RES/autorun_selected.json)")
     ap.add_argument("--dir", default=None, help="清洗过路件落盘目录(须可写;默认 ~/Downloads/af素材/<topic>)")
-    ap.add_argument("--dry-run", action="store_true", help="只校验库名+载入选中集,不清洗不入库")
+    ap.add_argument("--dry-run", action="store_true", help="只分组+校验各链接账号库名,不清洗不入库")
     args = ap.parse_args()
 
     res = os.path.abspath(args.res)
@@ -321,15 +425,9 @@ def main():
     outdir = args.dir or os.path.expanduser(os.path.join("~/Downloads/af素材", topic))
     os.makedirs(outdir, exist_ok=True)
 
-    log("node2=%s  account=%s  kb=%s  res=%s" % (NODE2, args.account, args.kb, res))
+    log("node2=%s  res=%s  兜底账号=%s  兜底库=%s" % (NODE2, res, args.account, args.kb))
 
-    # 0. 先校验库名(fail-fast)
-    kb_id, err = resolve_kb(args.account, args.kb)
-    if not kb_id:
-        log("❌ ABORT(库名校验):" + err); sys.exit(3)
-    log("库名匹配 → kb_id=%s" % kb_id)
-
-    # 1. 载入选中集 + 跨 run 去重
+    # 1. 载入选中集
     try:
         selected = json.load(open(items_path, encoding="utf-8"))
         if not isinstance(selected, list):
@@ -338,77 +436,53 @@ def main():
         log("❌ ABORT:载入选中集失败 %s:%s" % (items_path, str(e)[:120])); sys.exit(4)
     for it in selected:
         it["_sid"] = stable_id(it.get("page"), it.get("url"))
-    already = load_manifest_uploaded(manifest_path, kb_id)
-    fresh = [it for it in selected if it["_sid"] not in already]
-    skipped_dup = len(selected) - len(fresh)
-    log("选中 %d 条;跨run去重跳过 %d 条(已入库);本次清洗 %d 条" % (len(selected), skipped_dup, len(fresh)))
-    if not fresh:
-        log("✅ 无新素材需入库(全部已入库),结束"); return
-    if len(fresh) >= 30:
-        log("⚠️ 大批量 %d 条:占用共享 node2 GPU 较久,继续(无人值守不阻塞)" % len(fresh))
+
+    # 2. 按口播稿链接分组(一个链接 = 一套 账号+知识库 = 一个清洗任务)
+    groups = group_by_link(selected, args.account, args.kb)
+    n_links = sum(1 for k in groups if k != "__default__")
+    log("分组:%d 个口播稿链接%s,共 %d 条素材" % (
+        n_links, "(+1 个兜底组)" if "__default__" in groups else "", len(selected)))
+
+    # 3. 逐组校验 账号+库名(fail-fast per link)。任一坏链接 → 只跳过该链接、其余照入(用户拍板 2026-06-17);
+    #    全部链接都校验失败 → 整批 abort(具名理由)。
+    resolved = []; skipped_links = []
+    for key, g in groups.items():
+        name = g["source_link"] or ("兜底库「%s」" % (g["kb_name"] or "?"))
+        if not g["account"] or not g["kb_name"]:
+            reason = "缺账号或库名(account=%s kb=%s)" % (g["account"], g["kb_name"])
+            log("  ⏭️  跳过 %s:%s(%d 条不入库)" % (name, reason, len(g["items"])))
+            skipped_links.append((name, reason, len(g["items"]))); continue
+        kb_id, err = resolve_kb(g["account"], g["kb_name"])
+        if not kb_id:
+            log("  ⏭️  跳过 %s:%s(%d 条不入库)" % (name, err, len(g["items"])))
+            skipped_links.append((name, err, len(g["items"]))); continue
+        g["kb_id"] = kb_id
+        log("  ✓ %s → 账号 %s · 库「%s」kb_id=%s(%d 条)" % (name, g["account"], g["kb_name"], kb_id, len(g["items"])))
+        resolved.append(g)
+
+    if not resolved:
+        log("❌ ABORT:所有链接的账号/库名都校验失败,无可入库目标"); sys.exit(3)
 
     if args.dry_run:
-        log("--dry-run:到此为止(库名 OK,选中集 OK)"); return
+        log("--dry-run:到此为止(可入库链接 %d 个,跳过 %d 个)" % (len(resolved), len(skipped_links))); return
 
-    # 2~6. 清洗+入库(自动重试:每轮把"未入库且可安全重试"的失败子集重新发清洗任务,
-    #       直到 失败 ≤ 容忍阈值 / 无改善 / 轮次封顶。解决"下载失败→清洗失败"高频脆弱点,无人值守自愈)
-    FAIL_TOL = int(os.environ.get("AUTORUN_FAIL_TOLERANCE", "3"))   # 允许 ≤N 条最终失败(用户拍板 2026-06-17:3)
-    MAX_ROUNDS = int(os.environ.get("AUTORUN_MAX_ROUNDS", "4"))     # 重试轮次封顶,防顽固失败死循环
+    # 4. 串行:逐个口播稿链接跑完整 清洗+入库(用户拍板 2026-06-17:串行不并发)
+    summaries = [run_one_link(g, outdir, res, manifest_path) for g in resolved]
 
-    agg = {}            # _sid -> {cstat,kstat,key,job_id,err}(后轮覆盖前轮)
-    last_job = None
-    pending = list(fresh)
-    prev_retryable = None
-    rnd = 0
-    while rnd < MAX_ROUNDS:
-        rnd += 1
-        log(("清洗轮次 1" if rnd == 1 else "🔁 自动重试 第 %d 轮" % rnd) + "/%d:本轮 %d 条" % (MAX_ROUNDS, len(pending)))
-        round_res, last_job = _clean_round(pending, kb_id, args.account, outdir, res)
-        if last_job is None:
-            log("⚠️ 本轮清洗触发失败,停止重试"); break
-        agg.update(round_res)
-        not_up = [it for it in fresh if agg.get(it["_sid"], {}).get("kstat") != "uploaded"]
-        retryable = [it for it in not_up if _retryable(agg.get(it["_sid"], {}))]
-        log("第 %d 轮后:未入库 %d 条(其中可安全重试 %d)" % (rnd, len(not_up), len(retryable)))
-        if len(not_up) <= FAIL_TOL:
-            log("✅ 全部入库" if not not_up else "剩 %d 条失败 ≤ 容忍阈值 %d,可接受,停止重试" % (len(not_up), FAIL_TOL)); break
-        if not retryable:
-            log("⚠️ 剩 %d 条无法安全重试(kb 在途/超时,重投恐重复入库),停止" % len(not_up)); break
-        if prev_retryable is not None and len(retryable) >= prev_retryable:
-            log("⚠️ 本轮无改善(可重试 %d→%d),判顽固失败,停止重试" % (prev_retryable, len(retryable))); break
-        prev_retryable = len(retryable)
-        pending = retryable
-    else:
-        log("⚠️ 达重试轮次上限 %d,停止" % MAX_ROUNDS)
-
-    # 7. 写台账(每条原始 fresh 取最终聚合状态)+ 汇总
-    n_up = n_fail = n_clean_fail = 0
-    ts = int(time.time())
-    with open(manifest_path, "a", encoding="utf-8") as mf:
-        for it in fresh:
-            sid = it["_sid"]
-            r = agg.get(sid, {})
-            key = r.get("key"); cstat = r.get("cstat") or "orphan"; kstat = r.get("kstat")
-            if cstat != "done":
-                n_clean_fail += 1
-            if kstat == "uploaded":
-                n_up += 1
-            elif kstat and kstat != "uploaded":
-                n_fail += 1
-            mf.write(json.dumps({
-                "ts": ts, "kb_id": kb_id, "platform": it.get("platform", ""),
-                "script_name": it.get("script_name", ""), "stable_id": sid,
-                "key": key, "clean_status": cstat,
-                "kb_status": kstat or ("not_done" if cstat != "done" else "n/a"),
-                "audit": it.get("audit", "pass"), "title": (it.get("title") or "")[:80],
-                "err": r.get("err", ""),
-            }, ensure_ascii=False) + "\n")
-
-    log("===== 汇总 =====")
-    log("入库成功 uploaded=%d  入库失败/超时=%d  清洗未成功=%d  跨run去重跳过=%d  清洗轮次=%d" % (n_up, n_fail, n_clean_fail, skipped_dup, rnd))
+    # 5. 总汇总
+    log("===== 总汇总(%d 个链接)=====" % len(summaries))
+    tot_up = tot_fail = tot_cf = tot_dup = 0
+    for s in summaries:
+        tot_up += s["n_up"]; tot_fail += s["n_fail"]; tot_cf += s["n_clean_fail"]; tot_dup += s["skipped_dup"]
+        log("· %s:入库 %d  失败/超时 %d  清洗未成功 %d  去重跳过 %d%s" % (
+            s["tag"], s["n_up"], s["n_fail"], s["n_clean_fail"], s["skipped_dup"],
+            ("  进度页 %s/?job=%s" % (NODE2, s["last_job"])) if s["last_job"] else ""))
+    log("合计:入库 uploaded=%d  失败/超时=%d  清洗未成功=%d  跨run去重=%d" % (tot_up, tot_fail, tot_cf, tot_dup))
+    if skipped_links:
+        log("⏭️ 跳过的链接 %d 个(账号/库名问题,这些素材未入库,改对了重跑会补上):" % len(skipped_links))
+        for name, reason, n in skipped_links:
+            log("   - %s(%d 条):%s" % (name, n, reason))
     log("台账:%s" % manifest_path)
-    if last_job:
-        log("进度页:%s/?job=%s" % (NODE2, last_job))
 
 
 def dlport_required(res):

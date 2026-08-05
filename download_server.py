@@ -19,9 +19,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 RES = os.environ.get("BROLL_RES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 PORT = int(os.environ.get("DOWNLOAD_PORT", "8788"))
 DEFAULT_DIR = os.path.expanduser(os.environ.get("DOWNLOAD_DIR") or "~/Downloads/af素材")
-PLAT_CN = {"bilibili": "B站", "youtube": "YouTube", "xiaohongshu": "小红书", "douyin": "抖音"}
+PLAT_CN = {"bilibili": "B站", "youtube": "YouTube", "xiaohongshu": "小红书", "douyin": "抖音", "pexels": "Pexels"}
 CLEAN_BASE = os.environ.get("MATCLEAN_CLEAN_URL", "https://tool.alphafin.world").rstrip("/")
 CLEAN_TOKEN = os.environ.get("MATCLEAN_CLEAN_TOKEN", "")
+# 体积上限(env BROLL_MAX_MB,默认 0=不限)+ 时长上限(env BROLL_MAX_DUR_SEC,默认 0=不限):
+# 下载后产物超限即删档+判 fail(不投 node2/不入库)。单一陷阱点 process() 执行,覆盖全平台。
+# B站时长在 prefilter 已按 spec.max_duration_sec kill;此处是抖音/小红书(收割无 duration)的硬兜底。
+MAX_BYTES = int(float(os.environ.get("BROLL_MAX_MB", "0")) * 1024 * 1024)
+MAX_DUR = int(float(os.environ.get("BROLL_MAX_DUR_SEC", "0")))
 
 HOME = os.path.expanduser("~")
 
@@ -195,6 +200,7 @@ def platform_of(item):
     host = (item.get("page") or "") + " " + (item.get("url") or "")
     if "抖音" in plat or "douyin.com" in host: return "douyin"
     if "小红书" in plat or "xiaohongshu.com" in host: return "xiaohongshu"
+    if "pexels" in plat.lower() or "pexels.com" in host.lower(): return "pexels"
     if "youtube.com" in host or "youtu.be" in host: return "youtube"  # 先判 YT(host 准)
     if "bilibili.com" in host or re.search(r"/BV[0-9A-Za-z]{8,}", host): return "bilibili"
     return "bilibili"  # "B站/YT" 标签且 host 缺失时的兜底
@@ -521,8 +527,53 @@ def dl_douyin(item, outbase):
     return out, ""
 
 
+def dl_pexels(item, outbase):
+    direct = (item.get("direct_url") or item.get("url") or "").strip()
+    parsed = urllib.parse.urlparse(direct)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "videos.pexels.com":
+        return None, "Pexels 仅允许 https://videos.pexels.com 官方直链"
+    if not parsed.path.lower().endswith(".mp4"):
+        return None, "Pexels 直链不是 MP4"
+    out = outbase + ".mp4"
+    part = out + ".part"
+    headers = {"User-Agent": UA, "Referer": "https://www.pexels.com/"}
+    err = ""
+    import requests
+    for attempt in range(3):
+        try:
+            if os.path.exists(part):
+                os.remove(part)
+            resp = requests.get(direct, headers=headers, timeout=90, stream=True,
+                                allow_redirects=False)
+            if 300 <= resp.status_code < 400:
+                raise RuntimeError("HTTP %d redirect rejected" % resp.status_code)
+            resp.raise_for_status()
+            with open(part, "wb") as f:
+                for chunk in resp.iter_content(1 << 16):
+                    if chunk:
+                        f.write(chunk)
+                f.flush()
+                os.fsync(f.fileno())
+            if os.path.getsize(part) <= 1024:
+                raise RuntimeError("文件过小")
+            os.replace(part, out)
+            return out, ""
+        except Exception as exc:
+            err = str(exc)[:80]
+        finally:
+            if os.path.exists(part):
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))
+    return None, "Pexels 下载失败:" + err
+
+
 DOWNLOADERS = {"bilibili": dl_bilibili, "youtube": dl_youtube,
-               "xiaohongshu": dl_xiaohongshu, "douyin": dl_douyin}
+               "xiaohongshu": dl_xiaohongshu, "douyin": dl_douyin,
+               "pexels": dl_pexels}
 
 
 def xhs_download_warn(item):
@@ -543,6 +594,10 @@ MAX_FNAME = 70   # 含 .mp4 在内的文件名总长上限(字符数)
 def native_id(item):
     """平台原生序列号(非自增、稳定不重复):复用 stable_id 抽出的平台 ID,去掉我们自己加的前缀。
     B站 BV 号本就是平台原生序列(stable_id 不加前缀,保留);抖音/小红书/YT/兜底去掉 dy_/xhs_/yt_/id_。"""
+    if platform_of(item) == "pexels":
+        m = re.search(r"pexels\.com/(?:[^/]+/)?video/(?:[^/?#]*-)?(\d+)", item.get("page") or "")
+        if m:
+            return m.group(1)
     sid = stable_id(item.get("page"), item.get("url"))
     return re.sub(r"^(dy_|xhs_|yt_|id_)", "", sid)
 
@@ -572,11 +627,41 @@ def process(item, outdir):
     warn = xhs_download_warn(item)           # 小红书无类型映射 → 图文可能被下成幻灯片 mp4,告警(不阻断)
     existing = _find_output(outbase)         # 幂等:已下过就跳过
     if existing and os.path.getsize(existing) > 1024:
+        rej = _over_limit(existing)
+        if rej:
+            return _reject_local(plat, existing, outbase, warn, rej)
         return {"platform": plat, "status": "skip", "file": existing, "bytes": os.path.getsize(existing), "warn": warn}
     fn, err = DOWNLOADERS[plat](item, outbase)
     if fn:
+        rej = _over_limit(fn)
+        if rej:
+            return _reject_local(plat, fn, outbase, warn, rej)
         return {"platform": plat, "status": "ok", "file": fn, "bytes": os.path.getsize(fn), "warn": warn}
     return {"platform": plat, "status": "fail", "file": None, "bytes": 0, "error": err}
+
+
+def _over_limit(fn):
+    """超体积/超时长 → 返回原因串(非空=拒收);都不超返回 ""。时长用 ffmpeg 容器时长(无 ffprobe 时兜底)。"""
+    if MAX_BYTES and os.path.getsize(fn) > MAX_BYTES:
+        return "超过体积上限 %.0fMB > %dMB,跳过" % (os.path.getsize(fn) / 1024 / 1024, MAX_BYTES // 1024 // 1024)
+    if MAX_DUR:
+        try:
+            p = subprocess.run([FFMPEG, "-hide_banner", "-i", fn], capture_output=True, text=True, timeout=60)
+            m = re.search(r"Duration:\s*(\d+):(\d+):([0-9.]+)", p.stderr or "")
+            if m:
+                dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                if dur > MAX_DUR:
+                    return "超过时长上限 %.0fs > %ds,跳过" % (dur, MAX_DUR)
+        except Exception:
+            pass                              # 量不出时长不误杀(只兜底,不阻塞)
+    return ""
+
+
+def _reject_local(plat, fn, outbase, warn, reason):
+    for g in glob.glob(outbase + "*"):       # 删档:不留超限本地产物,也不投 node2/不入库
+        try: os.remove(g)
+        except Exception: pass
+    return {"platform": plat, "status": "fail", "file": None, "bytes": 0, "error": reason, "warn": warn}
 
 
 def manifest_append(item, res, outdir):
@@ -585,6 +670,7 @@ def manifest_append(item, res, outdir):
            "title": item.get("title", ""), "page": item.get("page", ""), "url": item.get("url", ""),
            "verdict": item.get("verdict", ""), "score": item.get("score", ""),
            "script_name": item.get("script_name", ""), "persona": item.get("persona", ""),
+           "pool": item.get("pool", "") or "theme", "from_script": item.get("from_script", ""),
            "status": res["status"],
            "file": (os.path.basename(res["file"]) if res.get("file") else ""),
            "bytes": res.get("bytes", 0), "error": res.get("error", ""), "warn": res.get("warn", "")}
@@ -601,7 +687,8 @@ def _clean_item(sid, it):
             "score": it.get("score", ""),
             "name": build_name(it) + ".mp4",
             "name_prefix": (it.get("script_name") or "").strip(),
-            "persona": it.get("persona", "")}
+            "persona": it.get("persona", ""),
+            "pool": it.get("pool", "") or "theme", "from_script": it.get("from_script", "")}
 
 
 def resolve_outdir(raw):
@@ -1072,6 +1159,17 @@ class H(BaseHTTPRequestHandler):
             sid = stable_id(it.get("page"), it.get("url"))
             seen.setdefault(sid, it)
         pairs = list(seen.items())
+        # blocklist(RES/clean_blocklist.json = stable_id 列表):跳过这些条目——不下载/不投 node2/不重试。
+        # 每次 /clean 请求重读(动态生效);用于"超大文件/用户点名终止"的素材永久排除,重试轮也不再拉它们。
+        try:
+            _bl = set(json.load(open(os.path.join(RES, "clean_blocklist.json"), encoding="utf-8")))
+        except Exception:
+            _bl = set()
+        if _bl:
+            _before = len(pairs)
+            pairs = [(sid, it) for sid, it in pairs if sid not in _bl]
+            if len(pairs) < _before:
+                self._line({"event": "info", "msg": "blocklist 跳过 %d 条(不下载/不投清洗)" % (_before - len(pairs))})
         # ⑤ 文件名:用平台原生ID(稳定不重复),投 node2 的 name 与真实下载用的 name 同 build_name 逻辑,天然一致
         hdr = {"X-Clean-Token": CLEAN_TOKEN} if CLEAN_TOKEN else {}
         payload = {"topic": os.path.basename(outdir.rstrip("/")) or "broll",

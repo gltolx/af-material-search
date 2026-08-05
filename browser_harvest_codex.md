@@ -9,7 +9,7 @@
 - `take_screenshot` — 截屏(验证码检测/留证)
 
 ## 前置(每次开工)
-1. **起采集 Chrome**:`bash {{BROLL_HOME}}/codex_chrome.sh`(带调试端口 9222 + 持久独立 profile;**首次**在弹出的窗口里登录 小红书/抖音/B站/YouTube 各一次)。MCP 已配 `--browserUrl http://127.0.0.1:9222` attach 它。健康检查是 `http://127.0.0.1:9222/json/version`;不要打开裸 http://127.0.0.1:9222/ 当用户页面。
+1. **起采集 Chrome**:`bash {{BROLL_HOME}}/codex_chrome.sh`(带调试端口 9222 + 持久独立 profile;**首次**在弹出的窗口里登录 小红书/抖音/B站/YouTube 各一次)。MCP 已配 `--browserUrl http://127.0.0.1:9222` attach 它。健康检查是 `http://127.0.0.1:9222/json/version`;不要打开裸 http://127.0.0.1:9222/ 当用户页面。用户要看的页面是后面 `python3 -m http.server 0 --directory <BROLL_RES>` 的 `filtered.html`。
 2. **国内出口自检**(关键,别跳):`navigate` 到 `about:blank` → `evaluate`:
    ```js
    fetch('https://myip.ipip.net').then(r=>r.text())
@@ -38,6 +38,10 @@
 
 ## 抖音收割(每词)
 同上,navigate `https://www.douyin.com/search/KW?type=video` → render 探活(轮询 `document.querySelectorAll('a[href*="/video/"]').length>0`)→ `evaluate` 跑 snippets 抖音段 IIFE,同一个 `SID` 替换 `<SID>`,最后一行换成 `return localStorage.getItem('dyAll_<SID>');` → 覆盖写 `BROLL_RES/dy_raw.json`。文件名固定不带 SID;并行隔离靠各会话独立 `BROLL_RES`。**节奏 ≥8s/词**(抖音对密集 navigate 最敏感,建议 ≥10s + 抖动)。
+
+**新版 DOM 兜底:** 实测会出现 `a[href*="/video/"]` 有 16/26 条,但旧 `.search-result-card` 容器抽取落盘 0 的情况。Codex 抓抖音时以 anchor 为真源:遍历 `document.querySelectorAll('a[href*="/video/"]')`,用 `href.match(/video\/(\d{15,})/)` 取 id,再从 `a.closest('[data-e2e], article, section, div') || a` 取 `innerText` 和封面。不要把 `.search-result-card` 当唯一父容器。
+
+**每词日志:** 每词写 `_codex_dy_log.json` 行 `{kw,anchors,rows,added,total,blocked,err}`。`anchors=0` 只说明该词当次无结果/DOM 未给,不等于登录失效;只有验证码检测或页面文本明确 blocked 才停手等用户。日志要随 `dy_raw.json` 增量覆盖,避免中途失败看不出搜到哪。
 
 ## 验证码(红线照旧:绝不自动解)
 - **每词收割前先 `evaluate` 跑 `detect_captcha.js` 的检测段**,返回 `{blocked,platform,type,...}`。

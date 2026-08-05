@@ -24,7 +24,7 @@ for f in "${required[@]}"; do
 done
 
 targets=()
-for base in "$HOME/.claude/skills" "$HOME/.codex/skills"; do
+for base in "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.agents/skills"; do
   parent="$(dirname "$base")"
   [ -d "$parent" ] && targets+=("$base")
 done

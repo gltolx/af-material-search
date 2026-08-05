@@ -33,7 +33,18 @@ try:
     _SPEC = json.load(open(os.path.join(RES, "relevance_spec.json"), encoding="utf-8"))
 except Exception:
     pass
-BILI_Q = _SPEC.get("bili_queries") or [
+# 收割前核心主体自愈(必经路径绕不过;幂等,AI 若已显式跑过则 no-op)。只增 autoheal_added,绝不改原 queries。
+_BILI_BASE = _SPEC.get("bili_queries") or []
+try:
+    import autoheal_queries
+    _ah = autoheal_queries.augment(RES)
+    if _ah.get("added"):
+        print("[harvest_net] autoheal 补查询词:", _ah["added"])
+    _SPEC = json.load(open(os.path.join(RES, "relevance_spec.json"), encoding="utf-8"))  # 重载拿 autoheal_added
+    _BILI_BASE = autoheal_queries.merged_queries(_SPEC, "bili")                            # base ∪ 自愈补的
+except Exception as _e:
+    print("[harvest_net] autoheal 跳过(不阻塞):", str(_e)[:120])
+BILI_Q = _BILI_BASE or [
     "2002世界杯 中国队 集锦", "2002世界杯 国足 进球", "米卢 中国队 2002", "米卢 快乐足球",
     "2002韩日世界杯 中国队", "国足 五里河 出线", "范志毅 孙继海 国足 2002", "中国队 巴西 2002世界杯",
     "2002世界杯 中国队 纪录片", "奥克斯 米卢 广告", "国足 2002 世界杯 回顾", "李铁 杨晨 郝海东 2002",
@@ -84,6 +95,8 @@ def harvest_bili():
 
 def harvest_yt():
     log("yt", "start"); out = []
+    if os.environ.get("BROLL_NO_YT") == "1":  # 本批不爬YouTube时,空返回(不回退默认词)
+        log("yt", "skip(BROLL_NO_YT=1)"); print("YouTube skip(BROLL_NO_YT=1)"); return out
     for kw, n in YT_Q:
         try:
             r = subprocess.run([YTDLP, f"ytsearch{n}:{kw}", "--flat-playlist",
