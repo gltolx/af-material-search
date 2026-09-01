@@ -3,7 +3,7 @@
 → 写 BROLL_RES/harvest_net.json(数据契约5字段),各线程往 timings.jsonl 记起止。
 跑:BROLL_RES=<dir> python3 harvest_net.py &  (run_in_background)
 """
-import json, os, re, subprocess, time, urllib.request, urllib.parse, html as _html
+import json, os, random, re, subprocess, time, urllib.request, urllib.parse, html as _html
 from concurrent.futures import ThreadPoolExecutor
 
 RES = os.environ.get("BROLL_RES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
@@ -78,7 +78,7 @@ def harvest_bili():
                     headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.bilibili.com/"})
                 d = json.loads(urllib.request.urlopen(req, timeout=20).read())
             except Exception as ex:
-                print("  ⚠️ bili", kw, page, ex); time.sleep(1.0); continue
+                print("  ⚠️ bili", kw, page, ex); time.sleep(random.uniform(1.0, 3.0)); continue
             for g in (d.get("data") or {}).get("result") or []:
                 if isinstance(g, dict) and g.get("result_type") == "video":
                     for v in g.get("data") or []:
@@ -90,7 +90,7 @@ def harvest_bili():
                         out.append({"platform": "B站/YT", "title": strip_em(v.get("title")),
                                     "url": url, "page": url, "cover": pic,
                                     "duration": parse_dur(v.get("duration"))})
-            time.sleep(0.5)
+            time.sleep(random.uniform(0.5, 2.5))
     log("bili", "end"); print(f"B站 收 {len(out)}"); return out
 
 def harvest_yt():
@@ -114,6 +114,7 @@ def harvest_yt():
             out.append({"platform": "B站/YT", "title": p[1].strip(),
                         "url": url, "page": url, "cover": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
                         "duration": dur})
+        time.sleep(random.uniform(0.5, 2.5))
     log("yt", "end"); print(f"YouTube 收 {len(out)}"); return out
 
 log("net", "start")

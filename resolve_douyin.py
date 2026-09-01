@@ -27,8 +27,9 @@ def resolve_once(vid):
     # 正确做法:下载端 dl_douyin 试1080p→量真实分辨率→<1080则回退真720p(取较大者)。要求:有更高清不低于1080p。
     cov = (v.get("cover", {}).get("url_list") or v.get("origin_cover", {}).get("url_list") or [None])[0]
     dms = v.get("duration")  # 抖音时长在 video.duration,单位毫秒(顶层 duration 是 None)
-    return {"id": vid, "title": (data.get("desc", "") or "").strip(), "play": play or "", "cover_remote": cov or "",
-            "duration": (round(dms / 1000) if dms else None)}
+    author = ((data.get("author") or {}).get("nickname") or "").strip()
+    return {"id": vid, "title": (data.get("desc", "") or "").strip(), "author": author,
+            "play": play or "", "cover_remote": cov or "", "duration": (round(dms / 1000) if dms else None)}
 
 def resolve(vid, retries=3):
     for i in range(retries):
@@ -36,7 +37,7 @@ def resolve(vid, retries=3):
             return resolve_once(vid)
         except Exception as e:
             if i == retries - 1:
-                return {"id": vid, "title": "", "play": "", "cover_remote": "", "err": str(e)[:60]}
+                return {"id": vid, "title": "", "author": "", "play": "", "cover_remote": "", "err": str(e)[:60]}
             time.sleep(SLEEP * (i + 2))
 
 def cache_cover(vid, url):
@@ -63,7 +64,7 @@ if __name__ == "__main__":  # 批量解析(被 download_server.py 复用 resolve
     for n, vid in enumerate(ids, 1):
         r = resolve(vid)
         lc = cache_cover(vid, r.get("cover_remote"))
-        rec = {"platform": "抖音", "title": r.get("title") or "",
+        rec = {"platform": "抖音", "title": r.get("title") or "", "author": r.get("author") or "",
                "url": r.get("play") or "", "page": f"https://www.douyin.com/video/{vid}",
                "cover": lc or (r.get("cover_remote") or ""), "duration": r.get("duration")}
         out.append(rec)

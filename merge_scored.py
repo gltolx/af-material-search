@@ -47,7 +47,7 @@ for _pool, _src in (("theme", net + xhs + dy), ("filler", xhs_f + dy_f)):
         k = canon(c)
         if k in seen: continue
         seen.add(k)
-        merged.append({"platform": c["platform"], "title": c.get("title", ""),
+        merged.append({"platform": c["platform"], "title": c.get("title", ""), "author": c.get("author", ""),
                        "url": c.get("url", ""), "page": c.get("page", ""), "cover": c.get("cover", ""),
                        "duration": c.get("duration"), "src_pool": _pool})
 

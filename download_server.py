@@ -491,6 +491,28 @@ def _dl_once(play, h, out):
     return False, err
 
 
+def _dl_douyin_ytdlp(page, outbase):
+    """iesdouyin 改版/限流时，用登录态 Chrome + 新 yt-dlp 兜底抖音下载。"""
+    if not page or not os.path.exists(YTDLP_NEW):
+        return None, "yt-dlp-new 不可用"
+    env = dict(os.environ, PATH=os.path.expanduser("~/.local/bin") + ":" + os.environ.get("PATH", ""))
+    cmd = [YTDLP_NEW, "--no-warnings", "--no-playlist", "--ffmpeg-location", FFMPEG,
+           "--cookies-from-browser", "chrome",
+           "-f", "bv*+ba/b", "-S", "res:1080,vcodec:avc1,acodec:m4a",
+           "--merge-output-format", "mp4", "-o", outbase + ".%(ext)s",
+           "--no-overwrites", "--continue", "--retries", "10", "--fragment-retries", "10",
+           "--socket-timeout", "40", page]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env)
+    except subprocess.TimeoutExpired:
+        return None, "抖音 yt-dlp 超时(900s)"
+    output = _find_output(outbase)
+    if output and os.path.getsize(output) > 1024:
+        return output, ""
+    tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    return None, ("抖音 yt-dlp rc=%d %s" % (proc.returncode, tail[-1] if tail else ""))[:220]
+
+
 def dl_douyin(item, outbase):
     if dy_resolve is None:
         return None, "抖音不可用(没用 douyin venv python 跑?):" + _DY_ERR
@@ -508,14 +530,25 @@ def dl_douyin(item, outbase):
     if not play:                             # ⑥d 0 成本兜底:仍空则回退试一次 item 自带 url(0 次新解析)
         play = (item.get("url") or "").strip() or None
     if not play:
-        return None, "解析无 play(KR限流/改版):" + (r.get("err", "") or "")
+        fn, fallback_err = _dl_douyin_ytdlp(item.get("page") or "", outbase)
+        if fn:
+            return fn, ""
+        return None, "解析无 play(KR限流/改版):" + (r.get("err", "") or "") + "; " + fallback_err
     h = {**DY_HDR, "Referer": "https://www.douyin.com/"}
     out = outbase + ".mp4"
     # 要求:有更高清就不低于1080p。先取1080p,量真实分辨率;若<1080(约30%新闻片无1080p无水印转码,
     # 强抬会被甩到576p实验流)则回退到真720p,保留较大者。源即≤720p的视频两档相同,无副作用。
     ok, err = _dl_once(_set_ratio(play, "1080p"), h, out)
     if not ok:
-        return None, "下载失败:" + err
+        try:
+            if os.path.exists(out):
+                os.remove(out)
+        except OSError:
+            pass
+        fn, fallback_err = _dl_douyin_ytdlp(item.get("page") or "", outbase)
+        if fn:
+            return fn, ""
+        return None, "下载失败:" + err + "; " + fallback_err
     if _mp4_short_side(out) >= 1080:
         return out, ""
     alt = out + ".720"

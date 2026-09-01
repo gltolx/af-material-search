@@ -26,7 +26,7 @@ for i, c in enumerate(cands):
     plat = c.get("platform", "")
     t = (c.get("title") or "").strip()
     pool = "filler" if c.get("src_pool") == "filler" else "theme"
-    rec = {"idx": i, "platform": plat, "title": t, "url": c.get("url", ""),
+    rec = {"idx": i, "platform": plat, "title": t, "author": c.get("author", ""), "url": c.get("url", ""),
            "page": c.get("page", ""), "cover": c.get("cover", ""), "duration": c.get("duration"),
            "pool": pool}
     dur = c.get("duration")
@@ -45,7 +45,7 @@ for i, c in enumerate(cands):
     if neg:
         rec["stage0"] = "kill"; rec["kill_reason"] = neg; kill.append(rec)
     elif dur and dur > MAXDUR:
-        rec["stage0"] = "kill"; rec["kill_reason"] = f"超20分钟({dur}s)"; kill.append(rec)
+        rec["stage0"] = "kill"; rec["kill_reason"] = f"超{MAXDUR // 60}分钟({dur}s)"; kill.append(rec)
     elif plat == "小红书" and (not t or t == "(无标题)" or len(t) < 2):
         rec["stage0"] = "need_enrich"; need_enrich.append(rec)
     else:

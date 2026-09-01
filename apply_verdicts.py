@@ -279,6 +279,8 @@ def card(c):
         mtag = '<div class="mtag">' + (('👤' + per + ' ｜ ') if per else '') + '📄' + e(sm["name"]) + '</div>'
     else:
         ds = ''; mtag = ''
+    author = (c.get("author") or "").strip()
+    author_tag = ('<div class="sub">作者：' + e(author) + '</div>') if author else ''
     return ('<div class="card' + (' undl' if undl else '') + '" data-id="' + e(sid) + '">'
             '<a class="thumb" href="' + link + '" target="_blank" rel="noopener"'
             ' data-plat="' + e(c["platform"]) + '" data-page="' + e(c.get("page") or "") + '" data-url="' + e(c.get("url") or "")
@@ -288,7 +290,7 @@ def card(c):
             ' data-plat="' + e(c["platform"]) + '" data-page="' + e(c.get("page") or "") + '" data-url="' + e(c.get("url") or "")
             + '" data-title="' + e(c.get("title") or "") + '" data-verdict="' + e(c["verdict"])
             + '" data-score="' + e(c["vscore"] if c["vscore"] is not None else "") + '" data-pool="' + ("filler" if is_filler else "theme") + '"' + ds + chk + dis + '></label></a>'
-            '<div class="meta"><a href="' + link + '" target="_blank" rel="noopener">' + e(c.get("title") or "(无标题)") + '</a>' + mtag + '<div class="sub">' + e(c["vreason"]) + '</div></div></div>')
+            '<div class="meta"><a href="' + link + '" target="_blank" rel="noopener">' + e(c.get("title") or "(无标题)") + '</a>' + mtag + author_tag + '<div class="sub">' + e(c["vreason"]) + '</div></div></div>')
 def zone(items): return "".join(card(c) for c in sorted(items, key=lambda x: -(x["vscore"] or 0)))
 def zone_filler(items):  # filler 区按 duration 升序(越短越靠前);无 duration(图文)排最后
     def k(x):
